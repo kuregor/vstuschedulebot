@@ -37,6 +37,16 @@ class Settings:
     semester_start: str = field(default_factory=lambda: os.getenv("SEMESTER_START", "2026-09-01"))
     semester_end: str = field(default_factory=lambda: os.getenv("SEMESTER_END", "2026-12-31"))
 
+    # Mini App: публичный https-адрес (его Telegram открывает внутри себя)
+    # и локальный сокет, который слушает встроенный веб-сервер.
+    webapp_url: str = field(default_factory=lambda: os.getenv("WEBAPP_URL", ""))
+    webapp_host: str = field(default_factory=lambda: os.getenv("WEBAPP_HOST", "0.0.0.0"))
+    webapp_port: int = field(default_factory=lambda: int(os.getenv("WEBAPP_PORT", "8080")))
+    # Открывать приложение без подписи Telegram (для отладки в браузере).
+    webapp_allow_insecure: bool = field(
+        default_factory=lambda: os.getenv("WEBAPP_ALLOW_INSECURE", "0") == "1"
+    )
+
 
 def load_settings() -> Settings:
     return Settings()

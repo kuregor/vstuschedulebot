@@ -5,7 +5,13 @@ from datetime import date, timedelta
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    WebAppInfo,
+)
 
 from ..config import settings
 from ..db.models import Lesson, ProgramLevel
@@ -71,15 +77,49 @@ async def _group_picker(level: ProgramLevel | None = None) -> tuple[str, object]
     return title, groups_kb(groups, level)
 
 
+def _webapp_kb() -> InlineKeyboardMarkup | None:
+    """Кнопка, открывающая Mini App внутри Telegram."""
+    if not settings.webapp_url:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📅 Открыть расписание",
+                    web_app=WebAppInfo(url=settings.webapp_url),
+                )
+            ]
+        ]
+    )
+
+
 @router.message(CommandStart())
-@router.message(Command("group"))
+@router.message(Command("app"))
 async def cmd_start(message: Message) -> None:
+    kb = _webapp_kb()
+    if kb is not None:
+        await message.answer(
+            "<b>Расписание ВолгГТУ</b>\n\n"
+            "Нажмите кнопку ниже — расписание откроется приложением прямо в Telegram: "
+            "две недели, календарь занятых дней, карточки пар.\n\n"
+            "Группа переключается по её названию в шапке приложения.",
+            reply_markup=kb,
+        )
+        return
+
+    # WEBAPP_URL не задан — работаем текстовыми экранами.
     async with SessionLocal() as session:
         user = await svc.get_user(session, message.from_user.id)
     if user is not None and user.group_id:
-        text, kb = await _render_schedule(message.from_user.id, user.group_id)
-        await message.answer(text, reply_markup=kb)
+        text, fallback_kb = await _render_schedule(message.from_user.id, user.group_id)
+        await message.answer(text, reply_markup=fallback_kb)
         return
+    text, fallback_kb = await _group_picker()
+    await message.answer(text, reply_markup=fallback_kb)
+
+
+@router.message(Command("group"))
+async def cmd_group(message: Message) -> None:
     text, kb = await _group_picker()
     await message.answer(text, reply_markup=kb)
 
