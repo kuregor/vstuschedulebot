@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:latest
+    container_name: vstu-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: schedule
+      POSTGRES_PASSWORD: schedule
+      POSTGRES_DB: schedule
+      # чтобы psql внутри контейнера не ломал кириллицу в выводе
+      LANG: C.UTF-8
+    ports:
+      # если 5432 уже занят локальным PostgreSQL — поменяйте на "5433:5432"
+      # и поправьте порт в DATABASE_URL
+      - "5432:5432"
+    volumes:
+      - vstu-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U schedule -d schedule"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  vstu-pgdata:

@@ -44,7 +44,44 @@ copy .env.example .env
   пустым, `/import` будет доступен всем — удобно при настройке, но на публичном
   боте заполните.
 
-### PostgreSQL
+### PostgreSQL в Docker (рекомендуется)
+
+В проекте есть `docker-compose.yml` на образе `postgres:latest`:
+
+```cmd
+docker compose up -d
+docker compose ps
+```
+
+База, пользователь и пароль — `schedule` / `schedule` / `schedule`, данные
+лежат в именованном томе `vstu-pgdata` и переживают перезапуск контейнера.
+Строка подключения для `.env`:
+
+```
+DATABASE_URL=postgresql+asyncpg://schedule:schedule@localhost:5432/schedule
+```
+
+Полезные команды:
+
+```cmd
+docker compose logs -f db                                   :: логи
+docker compose stop                                         :: остановить
+docker compose start                                        :: запустить снова
+docker exec -it vstu-postgres psql -U schedule -d schedule  :: консоль psql
+docker compose down                                         :: удалить контейнер (том остаётся)
+docker compose down -v                                      :: удалить вместе с данными
+```
+
+То же самое без compose, одной командой:
+
+```cmd
+docker run -d --name vstu-postgres --restart unless-stopped -e POSTGRES_USER=schedule -e POSTGRES_PASSWORD=schedule -e POSTGRES_DB=schedule -p 5432:5432 -v vstu-pgdata:/var/lib/postgresql/data postgres:latest
+```
+
+Если порт 5432 уже занят локально установленным PostgreSQL, поменяйте
+проброс на `5433:5432` и порт в `DATABASE_URL`.
+
+### PostgreSQL без Docker
 
 Если сервер уже установлен, создайте базу и пользователя:
 
@@ -53,7 +90,7 @@ psql -U postgres -c "CREATE USER schedule WITH PASSWORD 'schedule';"
 psql -U postgres -c "CREATE DATABASE schedule OWNER schedule;"
 ```
 
-Таблицы бот создаёт сам при первом запуске.
+Таблицы бот создаёт сам при первом запуске — миграции не нужны.
 
 ### Запуск
 

@@ -87,9 +87,15 @@ async def save_schedule(
         groups[name] = group
     await session.flush()
 
-    # Перезалив: у затронутых групп чистим старые занятия целиком.
+    # Перезалив: у затронутых групп чистим старые занятия целиком. Даты удаляем
+    # явно — не полагаемся на ON DELETE CASCADE, чтобы не зависеть от того,
+    # включена ли в БД проверка внешних ключей.
     group_ids = [g.id for g in groups.values()]
     if group_ids:
+        old_lessons = select(Lesson.id).where(Lesson.group_id.in_(group_ids))
+        await session.execute(
+            delete(LessonDate).where(LessonDate.lesson_id.in_(old_lessons))
+        )
         await session.execute(delete(Lesson).where(Lesson.group_id.in_(group_ids)))
 
     dates_count = 0
