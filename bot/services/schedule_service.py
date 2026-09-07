@@ -28,6 +28,12 @@ async def get_user(session: AsyncSession, telegram_id: int) -> User | None:
     return await session.scalar(select(User).where(User.telegram_id == telegram_id))
 
 
+async def all_user_ids(session: AsyncSession) -> list[int]:
+    """Telegram id всех, кто уже пользовался ботом."""
+    rows = await session.execute(select(User.telegram_id))
+    return [row[0] for row in rows]
+
+
 async def set_user_group(session: AsyncSession, telegram_id: int, group_id: int) -> None:
     user = await get_user(session, telegram_id)
     if user is None:

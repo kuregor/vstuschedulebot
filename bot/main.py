@@ -7,6 +7,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
 from aiogram.types import (
     BotCommand,
     MenuButtonCommands,
@@ -15,15 +16,24 @@ from aiogram.types import (
 )
 
 from .config import settings
-from .db.session import init_db
+from .db.session import SessionLocal, init_db
 from .handlers import admin_import, schedule
+from .services import schedule_service as svc
 from .webapp import public_url
 from .webapp.server import start_webapp
+
+# Как часто сверяться с адресом, который публикует туннель. Это чтение файла,
+# в Telegram уходит только смена адреса, поэтому опрос можно держать частым:
+# после переподключения туннеля кнопка чинится за несколько секунд.
+POLL_PUBLIC_URL_SECONDS = 5
+# Пауза между чатами: Telegram не любит очередь запросов без передышки
+MENU_BUTTON_PAUSE_SECONDS = 0.05
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+log = logging.getLogger(__name__)
 
 
 async def _set_commands(bot: Bot) -> None:
@@ -38,35 +48,61 @@ async def _set_commands(bot: Bot) -> None:
     )
 
 
-async def _apply_menu_button(bot: Bot, url: str) -> None:
+def _menu_button(url: str) -> MenuButtonWebApp | MenuButtonCommands:
     """Кнопка меню слева от поля ввода: открывает Mini App или список команд."""
     if url:
-        await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(text="Расписание", web_app=WebAppInfo(url=url))
-        )
-    else:
-        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        return MenuButtonWebApp(text="Расписание", web_app=WebAppInfo(url=url))
+    return MenuButtonCommands()
 
 
-async def _watch_public_url(bot: Bot, known: str) -> None:
-    """Следит за сменой адреса туннеля и переставляет кнопку меню.
+async def _apply_menu_button(bot: Bot, url: str) -> None:
+    """Ставит кнопку меню всем: и по умолчанию, и каждому знакомому чату.
 
-    Адрес быстрого туннеля меняется при переподключении. Кнопки в сообщениях
-    строятся заново на каждый /start, а кнопка меню живёт на стороне Telegram —
-    её нужно переставить явно, иначе она останется на мёртвом адресе.
+    У чата, где приложение уже открывали, есть собственная кнопка меню, и она
+    главнее общей. Поэтому обновления одной только общей мало: пользователь
+    продолжал бы нажимать свою, оставшуюся на адресе прошлого туннеля. Чаты
+    берём из таблицы пользователей — тех, кто уже писал боту.
     """
-    while True:
-        await asyncio.sleep(30)
-        url = public_url.current()
-        if url == known:
-            continue
+    button = _menu_button(url)
+    await bot.set_chat_menu_button(menu_button=button)
+
+    async with SessionLocal() as session:
+        chat_ids = await svc.all_user_ids(session)
+    for chat_id in chat_ids:
         try:
-            await _apply_menu_button(bot, url)
-        except Exception:  # сеть/лимиты Telegram — попробуем на следующем круге
-            logging.exception("Не удалось обновить кнопку меню")
-            continue
-        logging.info("Адрес Mini App сменился: %s", url or "не задан")
-        known = url
+            await bot.set_chat_menu_button(chat_id=chat_id, menu_button=button)
+        except TelegramAPIError as exc:
+            # чат удалён, бот заблокирован — остальных это не касается
+            log.warning("Кнопка меню для %s не обновлена: %s", chat_id, exc)
+        await asyncio.sleep(MENU_BUTTON_PAUSE_SECONDS)
+
+
+async def _keep_menu_button(bot: Bot) -> None:
+    """Держит кнопку меню на актуальном адресе туннеля.
+
+    Адрес быстрого туннеля меняется при каждом переподключении, а кнопка меню
+    живёт на стороне Telegram: пока её не переставить, она открывает мёртвую
+    страницу. Кнопки внутри сообщений этим не страдают — они строятся заново
+    на каждый /start.
+
+    Ставит кнопку сразу и дальше проверяет адрес по кругу. Одно чтение адреса
+    на проход — иначе кнопка и запомненное значение расходятся: при старте
+    контейнеров бот и туннель поднимаются одновременно, и между двумя
+    чтениями адрес успевает смениться. Тогда кнопка осталась бы на старом
+    адресе, а сторож считал бы, что всё в порядке.
+    """
+    known: str | None = None
+    while True:
+        url = public_url.current()
+        if url != known:
+            try:
+                await _apply_menu_button(bot, url)
+            except Exception:  # сеть или лимиты Telegram — повторим на следующем круге
+                log.exception("Не удалось обновить кнопку меню")
+            else:
+                log.info("Кнопка меню ведёт на %s", url or "список команд")
+                known = url
+        await asyncio.sleep(POLL_PUBLIC_URL_SECONDS)
 
 
 async def main() -> None:
@@ -84,8 +120,7 @@ async def main() -> None:
     dp.include_router(schedule.router)
 
     await _set_commands(bot)
-    await _apply_menu_button(bot, public_url.current())
-    watcher = asyncio.create_task(_watch_public_url(bot, public_url.current()))
+    menu_keeper = asyncio.create_task(_keep_menu_button(bot))
 
     # Веб-сервер Mini App живёт в том же процессе, что и бот.
     runner = await start_webapp()
@@ -93,7 +128,7 @@ async def main() -> None:
     try:
         await dp.start_polling(bot)
     finally:
-        watcher.cancel()
+        menu_keeper.cancel()
         await runner.cleanup()
 
 
