@@ -5,3 +5,4 @@ venv/
 .env
 *.xls
 *.xlsx
+tools/

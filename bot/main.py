@@ -17,6 +17,7 @@ from aiogram.types import (
 from .config import settings
 from .db.session import init_db
 from .handlers import admin_import, schedule
+from .webapp import public_url
 from .webapp.server import start_webapp
 
 logging.basicConfig(
@@ -35,15 +36,37 @@ async def _set_commands(bot: Bot) -> None:
             BotCommand(command="import", description="Загрузить расписание по ссылке"),
         ]
     )
-    # Кнопка меню слева от поля ввода открывает Mini App.
-    if settings.webapp_url:
+
+
+async def _apply_menu_button(bot: Bot, url: str) -> None:
+    """Кнопка меню слева от поля ввода: открывает Mini App или список команд."""
+    if url:
         await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(
-                text="Расписание", web_app=WebAppInfo(url=settings.webapp_url)
-            )
+            menu_button=MenuButtonWebApp(text="Расписание", web_app=WebAppInfo(url=url))
         )
     else:
         await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
+
+async def _watch_public_url(bot: Bot, known: str) -> None:
+    """Следит за сменой адреса туннеля и переставляет кнопку меню.
+
+    Адрес быстрого туннеля меняется при переподключении. Кнопки в сообщениях
+    строятся заново на каждый /start, а кнопка меню живёт на стороне Telegram —
+    её нужно переставить явно, иначе она останется на мёртвом адресе.
+    """
+    while True:
+        await asyncio.sleep(30)
+        url = public_url.current()
+        if url == known:
+            continue
+        try:
+            await _apply_menu_button(bot, url)
+        except Exception:  # сеть/лимиты Telegram — попробуем на следующем круге
+            logging.exception("Не удалось обновить кнопку меню")
+            continue
+        logging.info("Адрес Mini App сменился: %s", url or "не задан")
+        known = url
 
 
 async def main() -> None:
@@ -61,6 +84,8 @@ async def main() -> None:
     dp.include_router(schedule.router)
 
     await _set_commands(bot)
+    await _apply_menu_button(bot, public_url.current())
+    watcher = asyncio.create_task(_watch_public_url(bot, public_url.current()))
 
     # Веб-сервер Mini App живёт в том же процессе, что и бот.
     runner = await start_webapp()
@@ -68,6 +93,7 @@ async def main() -> None:
     try:
         await dp.start_polling(bot)
     finally:
+        watcher.cancel()
         await runner.cleanup()
 
 

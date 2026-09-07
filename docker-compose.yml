@@ -1,7 +1,7 @@
 services:
   db:
-    image: postgres:latest
-    container_name: vstu-postgres
+    image: postgres:18
+    container_name: db
     restart: unless-stopped
     environment:
       POSTGRES_USER: schedule
@@ -10,16 +10,73 @@ services:
       # чтобы psql внутри контейнера не ломал кириллицу в выводе
       LANG: C.UTF-8
     ports:
-      # если 5432 уже занят локальным PostgreSQL — поменяйте на "5433:5432"
-      # и поправьте порт в DATABASE_URL
-      - "5432:5432"
+      # наружу для host-скриптов (scripts/parse_preview.py, psql с хоста).
+      # если 5433 занят — поменяйте на другой, внутри сети всё равно 5432
+      - "5433:5432"
     volumes:
-      - vstu-pgdata:/var/lib/postgresql/data
+      # в postgres 18+ монтируем каталог целиком, данные лягут в /var/lib/postgresql/18/docker
+      - vstu-pgdata:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U schedule -d schedule"]
       interval: 5s
       timeout: 5s
       retries: 10
 
+  # Бот + Mini App: webapp/ отдаётся тем же процессом, отдельный контейнер не нужен.
+  bot:
+    build: .
+    container_name: schedule-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # внутри сети compose база зовётся db:5432 — перекрываем localhost:5433 из .env
+      DATABASE_URL: postgresql+asyncpg://schedule:schedule@db:5432/schedule
+      WEBAPP_HOST: 0.0.0.0
+      WEBAPP_PORT: "7070"
+    ports:
+      # наружу — чтобы приложение можно было открыть с хоста в браузере
+      # (для этого в .env нужен WEBAPP_ALLOW_INSECURE=1, и ТОЛЬКО при
+      #  остановленном туннеле: иначе API без проверки подписи Telegram
+      #  окажется доступен всем по публичному адресу)
+      - "7070:7070"
+    volumes:
+      # сюда туннель кладёт актуальный публичный адрес; бот только читает
+      - tunnel-state:/state:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7070/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Публичный HTTPS-адрес, без которого Telegram не откроет Mini App.
+  # localhost.run — SSH-реверс: ни аккаунта, ни установки, ни заглушек.
+  # (Cloudflare Tunnel в этой сети не поднимается: провайдер режет DNS
+  #  для зоны argotunnel.com, cloudflared не находит edge и падает в цикле.)
+  #
+  # Адрес меняется при каждом переподключении, поэтому scripts/tunnel.sh пишет
+  # его в общий том /state/url, а бот читает оттуда на каждое построение кнопки:
+  # править .env и пересоздавать контейнер после обрыва больше не нужно.
+  # Посмотреть текущий:  docker compose logs tunnel | findstr lhr.life
+  # Постоянный поддомен даёт регистрация ключа на https://admin.localhost.run/
+  tunnel:
+    image: alpine:latest
+    container_name: tunnel
+    restart: unless-stopped
+    command: sh /tunnel.sh
+    volumes:
+      - ./scripts/tunnel.sh:/tunnel.sh:ro
+      - tunnel-state:/state
+    depends_on:
+      bot:
+        condition: service_healthy
+
 volumes:
+  # имя тома не трогаю: в нём лежит уже загруженное расписание,
+  # переименование создало бы пустой том
   vstu-pgdata:
+  # текущий публичный адрес приложения — общий между туннелем и ботом
+  tunnel-state:

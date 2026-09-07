@@ -40,6 +40,12 @@ class Settings:
     # Mini App: публичный https-адрес (его Telegram открывает внутри себя)
     # и локальный сокет, который слушает встроенный веб-сервер.
     webapp_url: str = field(default_factory=lambda: os.getenv("WEBAPP_URL", ""))
+    # Файл, куда контейнер туннеля пишет актуальный адрес. Если он есть, его
+    # значение важнее WEBAPP_URL: адрес быстрого туннеля меняется при каждом
+    # переподключении, а из .env он читается один раз при импорте.
+    webapp_url_file: str = field(
+        default_factory=lambda: os.getenv("WEBAPP_URL_FILE", "/state/url")
+    )
     webapp_host: str = field(default_factory=lambda: os.getenv("WEBAPP_HOST", "0.0.0.0"))
     webapp_port: int = field(default_factory=lambda: int(os.getenv("WEBAPP_PORT", "8080")))
     # Открывать приложение без подписи Telegram (для отладки в браузере).

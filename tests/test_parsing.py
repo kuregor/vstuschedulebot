@@ -9,13 +9,20 @@ from datetime import date
 from bot.parsing.classify import (
     TYPE_LAB,
     TYPE_LECTURE,
-    TYPE_OTHER,
+    TYPE_SEMINAR,
     classify_cell,
     clean_subject,
+    hours_to_slots,
     lesson_type,
+    marked_as_lecture,
 )
-from bot.parsing.dates import explicit_dates, lesson_dates, recurring_dates
-from bot.parsing.vstu_xls import detect_program_level
+from bot.parsing.dates import (
+    explicit_dates,
+    lesson_dates,
+    recurring_dates,
+    runs_biweekly,
+)
+from bot.parsing.vstu_xls import ParsedLesson, assign_lesson_types, detect_program_level
 
 SEM_START = date(2026, 9, 1)  # вторник
 SEM_END = date(2026, 12, 31)
@@ -34,10 +41,124 @@ def test_classify_cells():
     assert classify_cell("лаб.") == "note"
 
 
-def test_lesson_type_and_clean_subject():
-    assert lesson_type("ТЕХНОЛОГИИ АНАЛИЗА ДАННЫХ (лекция)", "") == TYPE_LECTURE
-    assert lesson_type("АНАЛИЗ И ВИЗУАЛИЗАЦИЯ ДАННЫХ", "лаб.") == TYPE_LAB
-    assert lesson_type("СИСТЕМНАЯ ИНЖЕНЕРИЯ", "01.10, 29.10") == TYPE_OTHER
+def test_lesson_type_rules():
+    # пара сразу у нескольких групп — лекция, что бы ни было с длительностью
+    assert lesson_type(True, 2, biweekly=False) == TYPE_LECTURE
+    assert lesson_type(True, 1, biweekly=True) == TYPE_LECTURE
+    # своя пара на 4 академических часа реже, чем раз в две недели, — лаба
+    assert lesson_type(False, 2, biweekly=False) == TYPE_LAB
+    # один слот (2 часа) — практика, сколько бы раз ни повторялась
+    assert lesson_type(False, 1, biweekly=False) == TYPE_SEMINAR
+    assert lesson_type(False, 1, biweekly=True) == TYPE_SEMINAR
+    # 4 часа, но раз в две недели — тоже практика (так стоит «проф. ин-яз»)
+    assert lesson_type(False, 2, biweekly=True) == TYPE_SEMINAR
+
+
+def _lesson(group: str, slot_from: int, slot_to: int, subject: str, room: str, **kw):
+    return ParsedLesson(
+        group=group,
+        week=1,
+        weekday=1,
+        slot_from=slot_from,
+        slot_to=slot_to,
+        subject=subject,
+        room=room,
+        **kw,
+    )
+
+
+def test_same_pair_in_several_groups_is_lecture():
+    note = "30.09, 28.10, 25.11,23.12"
+    lessons = [
+        _lesson("ЭВМ-1.2", 0, 1, "БОЛЬШИЕ ДАННЫЕ", "В-209", raw_note=note),
+        _lesson("ЭВМ-1.3", 0, 1, "БОЛЬШИЕ ДАННЫЕ", "В-209", raw_note=note),
+        # своя пара той же группы в другое время — не лекция
+        _lesson("ЭВМ-1.2", 4, 5, "СИСТЕМНАЯ ИНЖЕНЕРИЯ", "В-402", raw_note=note),
+    ]
+    assign_lesson_types(lessons)
+    assert [l.lesson_type for l in lessons] == [TYPE_LECTURE, TYPE_LECTURE, TYPE_LAB]
+
+
+def test_same_subject_in_different_rooms_is_not_lecture():
+    """Один предмет в одно время, но в разных аудиториях — это разные занятия."""
+    lessons = [
+        _lesson("САПР-1.1", 0, 0, "ИНОСТРАННЫЙ ЯЗЫК", "Б-602"),
+        _lesson("САПР-1.3", 0, 0, "ИНОСТРАННЫЙ ЯЗЫК", "Б-604"),
+    ]
+    assign_lesson_types(lessons)
+    assert [l.lesson_type for l in lessons] == [TYPE_SEMINAR, TYPE_SEMINAR]
+
+
+def test_subgroups_taking_turns_are_labs_not_lecture():
+    """Две группы в одной аудитории в одно время, но по очереди — через неделю
+    друг от друга: это лабы по подгруппам, а не общая лекция."""
+    lessons = [
+        _lesson("ЭВМ-1.2", 0, 1, "БОЛЬШИЕ ДАННЫЕ", "В-1301",
+                raw_note="03.09, 29.10, 26.11,24.12"),
+        _lesson("ЭВМ-1.3", 0, 1, "БОЛЬШИЕ ДАННЫЕ", "В-1301",
+                raw_note="17.09, 15.10, 12.11,10.12"),
+    ]
+    assign_lesson_types(lessons)
+    assert [l.lesson_type for l in lessons] == [TYPE_LAB, TYPE_LAB]
+
+
+def test_biweekly_four_hour_pair_is_practice():
+    """«Проф. ин-яз» идёт 4 часа, но раз в две недели — практика, не лаба."""
+    lessons = [_lesson("Ф-1", 0, 1, "ПРОФ. ИН-ЯЗ КОММУНИКАЦИЯ", "408а")]
+    assign_lesson_types(lessons)
+    assert lessons[0].lesson_type == TYPE_SEMINAR
+
+
+def test_merged_cell_marks_lecture_even_without_room_match():
+    lessons = [_lesson("Ф-1", 0, 1, "ФИЗИКА", "", shared_cell=True)]
+    assign_lesson_types(lessons)
+    assert lessons[0].lesson_type == TYPE_LECTURE
+
+
+def test_hours_note_overrides_block_position():
+    """«1-4ч» внутри блока — настоящее время пары, даже если блок стоит ниже."""
+    assert hours_to_slots("03.09, 29.10, 26.11,24.12, 1-4ч") == (0, 1)
+    assert hours_to_slots("16.09, 14.10, 11.11,09.12, 5-8 ч") == (2, 3)
+    assert hours_to_slots("9-12ч") == (4, 5)
+    # обычные заметки временем не считаются
+    assert hours_to_slots("14.09, 12.10, 09.11,07.12") is None
+    assert hours_to_slots("занятия с 16.09") is None
+    # часов в дне только 12
+    assert hours_to_slots("1-14ч") is None
+
+
+def test_explicit_lecture_mark_wins():
+    """Если в блоке написано «(лекция)» — это лекция, что бы ни говорила сетка."""
+    assert marked_as_lecture("МАТЕМАТИЧЕСКИЕ МЕТОДЫ В ФИЗИКЕ (лекция)", "") is True
+    assert lesson_type(False, 1, biweekly=True, marked_lecture=True) == TYPE_LECTURE
+    # названия предметов со словом «практика» пометкой не считаются
+    assert marked_as_lecture("ПРОИЗВОДСТВЕННАЯ ПРАКТИКА: НАУЧНО-ИССЛЕД. РАБОТА", "") is False
+    assert marked_as_lecture("СПЕЦИАЛЬНЫЙ ФИЗИЧЕСКИЙ ПРАКТИКУМ", "") is False
+
+
+def test_marked_lecture_in_single_group_pair():
+    lessons = [_lesson("Ф-1", 4, 4, "МАТЕМАТИЧЕСКИЕ МЕТОДЫ В ФИЗИКЕ", "315а",
+                       marked_lecture=True)]
+    assign_lesson_types(lessons)
+    assert lessons[0].lesson_type == TYPE_LECTURE
+
+
+def test_biweekly_detection():
+    assert runs_biweekly("") is True                       # нет дат — чередование
+    assert runs_biweekly("занятия с 16.09") is True        # оно же, но позже начинается
+    assert runs_biweekly("15.09, 29.09, 13.10, 27.10") is True   # шаг две недели
+    assert runs_biweekly("03.09, 29.10, 26.11,24.12") is False   # раз в месяц
+    assert runs_biweekly("02.10") is False                 # разовое занятие
+    # опечатка в датах («13.10» вместо «13.11») — шаг считать нельзя
+    assert runs_biweekly("02.10, 16.10, 13.10, 11.12") is False
+
+
+def test_hours_note_is_not_confused_with_subgroups():
+    assert hours_to_slots("1-2 подгруппа") is None
+    assert hours_to_slots("по подгруппам, 14.09") is None
+
+
+def test_clean_subject():
     assert clean_subject("ТЕХНОЛОГИИ АНАЛИЗА ДАННЫХ (лекция)") == "ТЕХНОЛОГИИ АНАЛИЗА ДАННЫХ"
 
 

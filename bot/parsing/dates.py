@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from statistics import median
 
 from .classify import DATE_RE, FROM_DATE_RE
 
@@ -43,6 +44,44 @@ def explicit_dates(note: str, semester_start: date, semester_end: date) -> list[
         if semester_start <= d <= semester_end and d not in out:
             out.append(d)
     return sorted(out)
+
+
+def runs_biweekly(note: str) -> bool:
+    """Идёт ли занятие раз в две недели (или чаще).
+
+    Без перечня дат занятие повторяется по чётности своего блока, то есть
+    ровно раз в две недели. Если даты перечислены, смотрим шаг между ними:
+    две недели и меньше — та же периодичность, реже — отдельные занятия
+    (обычно раз в месяц).
+    """
+    text = note or ""
+    if FROM_DATE_RE.search(text):
+        # «занятия с 16.09» — то же чередование, просто с более поздним началом
+        return True
+    pairs = [(int(month), int(day)) for day, month in DATE_RE.findall(text)]
+    if not pairs:
+        return True
+    if len(pairs) < 2:
+        return False
+    first_month = pairs[0][0]
+    days: list[int] = []
+    for month, day in pairs:
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            continue
+        try:
+            # год условный: нужен только шаг между датами, а не сами даты
+            days.append(date(2001 if month >= first_month else 2002, month, day).toordinal())
+        except ValueError:
+            continue
+    if days != sorted(days):
+        # даты в файле идут не по возрастанию — это опечатка (в проверенном
+        # файле «13.10» вместо «13.11»), и шаг между ними считать нельзя:
+        # тип занятия определится по длительности
+        return False
+    gaps = [b - a for a, b in zip(days, days[1:])]
+    if not gaps:
+        return False
+    return median(gaps) <= 14
 
 
 def recurring_dates(

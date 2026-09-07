@@ -30,13 +30,16 @@ import xlrd
 
 from .classify import (
     DATE_RE,
-    TYPE_OTHER,
+    TYPE_SEMINAR,
     classify_cell,
     clean_subject,
+    hours_to_slots,
     is_room,
+    marked_as_lecture,
     is_teacher,
     lesson_type,
 )
+from .dates import runs_biweekly
 from .grid import MergedGrid
 
 DAY_NAMES = [
@@ -83,8 +86,12 @@ class ParsedLesson:
     subject: str
     teacher: str = ""
     room: str = ""
-    lesson_type: str = TYPE_OTHER
+    lesson_type: str = TYPE_SEMINAR
     raw_note: str = ""
+    # предмет записан ячейкой, объединённой по колонкам нескольких групп
+    shared_cell: bool = False
+    # в блоке прямо написано «(лекция)»
+    marked_lecture: bool = False
 
     @property
     def slot_label(self) -> str:
@@ -232,6 +239,15 @@ def _parse_group_day(
         slot_to = min(max((end_row - row0) // ROWS_PER_SLOT, slot_from), SLOTS_PER_DAY - 1)
         note = ", ".join(current["notes"])
         subject_raw = current["subject"]
+
+        # Пометка «1-4ч» внутри блока — настоящие часы занятия. Учебный отдел
+        # иногда ставит блок не в свою строку сетки, и тогда позиция врёт,
+        # а пометка нет: время берём из неё.
+        block_label = SLOT_LABELS[slot_from]
+        by_hours = hours_to_slots(note)
+        moved = by_hours is not None and by_hours != (slot_from, slot_to)
+        if by_hours is not None:
+            slot_from, slot_to = by_hours
         lessons.append(
             ParsedLesson(
                 group=group,
@@ -242,8 +258,9 @@ def _parse_group_day(
                 subject=clean_subject(subject_raw),
                 teacher=current["teacher"],
                 room=current["room"],
-                lesson_type=lesson_type(subject_raw, note),
                 raw_note=note,
+                shared_cell=current["shared"],
+                marked_lecture=marked_as_lecture(subject_raw, note),
             )
         )
         where = (
@@ -252,6 +269,12 @@ def _parse_group_day(
         )
         if not current["teacher"]:
             warnings.append(f"{where} — не найден преподаватель")
+        if moved:
+            warnings.append(
+                f"{where} — блок стоит на парах {block_label}, но внутри указано "
+                f"«{SLOT_LABELS[slot_from].split('-')[0]}-"
+                f"{SLOT_LABELS[slot_to].split('-')[1]}ч»: время взято из пометки"
+            )
         if not _dates_ascending(note):
             warnings.append(
                 f"{where} — даты в файле идут не по возрастанию "
@@ -291,6 +314,9 @@ def _parse_group_day(
                 # аудиторию ищем по всей ширине объединения
                 "search_c0": min(span.c0, gc0),
                 "search_c1": max(span.c1, gc0 + block_width),
+                # ячейка предмета шире четырёх колонок группы — значит эта пара
+                # стоит сразу у нескольких групп, то есть читается лекцией
+                "shared": span.width > block_width,
             }
             add_notes(notes)  # заметка иногда стоит в той же строке, что и предмет
             continue
@@ -319,6 +345,49 @@ def _parse_group_day(
 
     flush(min(row0 + ROWS_PER_DAY, grid.nrows) - 1)
     return lessons
+
+
+def _share_key(lesson: ParsedLesson) -> tuple:
+    """Чем опознаётся одна и та же пара, стоящая у нескольких групп: время,
+    предмет, аудитория и даты занятий.
+
+    Даты в ключе обязательны. Две группы часто ходят в одну аудиторию к одному
+    преподавателю в одно и то же время, но по очереди — через неделю друг от
+    друга: это лабораторные по подгруппам, а не общая лекция. Отличаются они
+    как раз перечнем дат. Преподаватель в ключ не входит — его фамилию в файле
+    пишут по-разному («Харланов А.В» и «Харламов А.В.»)."""
+    dates = frozenset(DATE_RE.findall(lesson.raw_note or ""))
+    return (
+        lesson.week,
+        lesson.weekday,
+        lesson.slot_from,
+        lesson.subject,
+        lesson.room,
+        dates,
+    )
+
+
+def assign_lesson_types(lessons: list[ParsedLesson]) -> None:
+    """Проставляет тип занятия. Виден только на всём файле сразу: одна и та же
+    пара у нескольких групп — лекция, поэтому по группам это не определить."""
+    groups_by_key: dict[tuple, set[str]] = {}
+    for lesson in lessons:
+        if not lesson.room:
+            # без аудитории совпадение ненадёжно (пустое поле склеило бы
+            # разные пары) — для таких полагаемся только на объединение ячеек
+            continue
+        groups_by_key.setdefault(_share_key(lesson), set()).add(lesson.group)
+
+    for lesson in lessons:
+        shared = lesson.shared_cell or (
+            len(groups_by_key.get(_share_key(lesson), ())) > 1 if lesson.room else False
+        )
+        lesson.lesson_type = lesson_type(
+            shared,
+            lesson.slot_to - lesson.slot_from + 1,
+            runs_biweekly(lesson.raw_note),
+            marked_lecture=lesson.marked_lecture,
+        )
 
 
 def parse_workbook(path: str, filename: str = "") -> ParsedSchedule:
@@ -357,5 +426,7 @@ def parse_workbook(path: str, filename: str = "") -> ParsedSchedule:
                     grid, name, gc0, col_limit, week, weekday, row0, result.warnings
                 )
             )
+
+    assign_lesson_types(result.lessons)
 
     return result

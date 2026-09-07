@@ -14,9 +14,6 @@
   --sem-tint: oklch(0.97 0.02 65);
   --lab: oklch(0.55 0.09 25);
   --lab-tint: oklch(0.97 0.02 25);
-  /* типа нет в исходном файле расписания — нейтральный графит */
-  --other: oklch(0.55 0.02 265);
-  --other-tint: oklch(0.97 0.008 265);
 
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);

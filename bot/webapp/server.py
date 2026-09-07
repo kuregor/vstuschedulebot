@@ -10,6 +10,7 @@ from ..config import settings
 from ..db.models import ProgramLevel
 from ..db.session import SessionLocal
 from ..services import schedule_service as svc
+from . import public_url
 from .api import group_json, schedule_json
 from .auth import InitDataError, user_id_from_init_data
 
@@ -133,6 +134,6 @@ async def start_webapp() -> web.AppRunner:
         "Mini App слушает http://%s:%s (публичный адрес: %s)",
         settings.webapp_host,
         settings.webapp_port,
-        settings.webapp_url or "не задан — кнопка в боте не появится",
+        public_url.current() or "не задан — кнопка в боте не появится",
     )
     return runner

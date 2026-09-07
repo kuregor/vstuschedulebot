@@ -11,13 +11,11 @@ TYPE_MARK = {
     LessonType.lek: "🟢",
     LessonType.sem: "🟡",
     LessonType.lab: "🔴",
-    LessonType.other: "⚪️",
 }
 TYPE_TITLE = {
     LessonType.lek: "Лекция",
-    LessonType.sem: "Семинар",
+    LessonType.sem: "Практика",
     LessonType.lab: "Лаба",
-    LessonType.other: "Занятие",
 }
 
 DOW_SHORT = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
@@ -39,7 +37,7 @@ MONTHS_GEN = [
     "июля", "августа", "сентября", "октября", "ноября", "декабря",
 ]
 
-LEGEND = "🟢 лекция · 🟡 семинар · 🔴 лаба · ⚪️ тип не указан"
+LEGEND = "🟢 лекция · 🟡 практика · 🔴 лаба"
 
 
 def plural_pairs(n: int) -> str:

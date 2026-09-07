@@ -62,7 +62,7 @@ def schedule_kb(
 
 
 def _day_dots(types: list[str], limit: int = 3) -> str:
-    order = {"lek": 0, "sem": 1, "lab": 2, "other": 3}
+    order = {"lek": 0, "sem": 1, "lab": 2}
     ordered = sorted(types, key=lambda t: order.get(t, 9))
     dots = "".join(TYPE_MARK[LessonType(t)] for t in ordered[:limit])
     return dots + ("+" if len(ordered) > limit else "")

@@ -14,6 +14,8 @@ import re
 
 DATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\b")
 HOURS_RE = re.compile(r"^\d{1,2}\s*-\s*\d{1,2}\s*ч\.?$", re.IGNORECASE)
+# та же пометка, но найденная внутри заметки: «03.09, 29.10, 1-4ч»
+HOURS_IN_NOTE_RE = re.compile(r"\b(\d{1,2})\s*-\s*(\d{1,2})\s*ч\.?", re.IGNORECASE)
 FROM_DATE_RE = re.compile(r"занятия\s+с\s+(\d{1,2})\.(\d{1,2})", re.IGNORECASE)
 SUBGROUP_RE = re.compile(r"подгруппа|подгруппам", re.IGNORECASE)
 LAB_MARK_RE = re.compile(r"^лаб\.?$", re.IGNORECASE)
@@ -25,14 +27,15 @@ TEACHER_RE = re.compile(
 )
 ROOM_RE = re.compile(r"^(?:[А-ЯЁA-Z]\s*-\s*)?\d{1,4}\s*[а-яёa-z]?(?:\s*-\s*\d)?$", re.IGNORECASE)
 
-LECTURE_HINT_RE = re.compile(r"\(\s*лекц", re.IGNORECASE)
-LAB_HINT_RE = re.compile(r"\(\s*лаб|лабораторн", re.IGNORECASE)
-SEMINAR_HINT_RE = re.compile(r"\(\s*(?:пр|практ|сем)|семинар|практическ", re.IGNORECASE)
+# Явная пометка типа в тексте блока: только в скобках, чтобы не спутать с
+# названиями предметов вроде «ПРОИЗВОДСТВЕННАЯ ПРАКТИКА» или «ФИЗИЧЕСКИЙ ПРАКТИКУМ»
+LECTURE_MARK_RE = re.compile(r"\(\s*лекц", re.IGNORECASE)
+
+SLOTS_IN_DAY = 6  # пар в дне: «1-2» … «11-12»
 
 TYPE_LECTURE = "lek"
 TYPE_SEMINAR = "sem"
 TYPE_LAB = "lab"
-TYPE_OTHER = "other"
 
 
 def is_note(text: str) -> bool:
@@ -94,17 +97,47 @@ def classify_cell(text: str) -> str:
     return "other"
 
 
-def lesson_type(subject: str, notes: str) -> str:
-    """Тип занятия. В исходнике он размечен непоследовательно, поэтому это
-    эвристика: явные подсказки в тексте, иначе TYPE_OTHER (не выдумываем)."""
-    blob = f"{subject} {notes}"
-    if LAB_HINT_RE.search(blob) or LAB_MARK_RE.match(notes.strip()):
-        return TYPE_LAB
-    if LECTURE_HINT_RE.search(blob):
+def marked_as_lecture(subject: str, note: str) -> bool:
+    """В блоке прямо написано «(лекция)» — это главнее любых догадок."""
+    return bool(LECTURE_MARK_RE.search(f"{subject} {note}"))
+
+
+def lesson_type(
+    shared_with_groups: bool, slots: int, biweekly: bool, marked_lecture: bool = False
+) -> str:
+    """Тип занятия. В тексте файла он размечен лишь местами, поэтому в
+    основном берётся из структуры расписания. Правила по порядку:
+
+    1. в блоке написано «(лекция)» — лекция;
+    2. пара стоит одновременно у нескольких групп — лекция;
+    3. пара на один слот (2 академических часа) либо идущая раз в две
+       недели, сколько бы слотов ни занимала, — практика;
+    4. остальное, то есть два слота (4 часа) реже чем раз в две недели, —
+       лабораторная.
+
+    Правила покрывают все случаи, поэтому «тип не указан» больше не бывает.
+    """
+    if marked_lecture or shared_with_groups:
         return TYPE_LECTURE
-    if SEMINAR_HINT_RE.search(blob):
+    if biweekly or slots < 2:
         return TYPE_SEMINAR
-    return TYPE_OTHER
+    return TYPE_LAB
+
+
+def hours_to_slots(note: str) -> tuple[int, int] | None:
+    """Пометка вида «1-4ч» — настоящие академические часы занятия.
+
+    Учебный отдел иногда ставит блок не в ту строку сетки, а фактическое время
+    дописывает внутрь блока. Такая пометка главнее позиции блока.
+    Часы 1-2 — это первая пара, 3-4 — вторая и так далее: слот = (час - 1) // 2.
+    """
+    m = HOURS_IN_NOTE_RE.search(note or "")
+    if not m:
+        return None
+    first, last = int(m.group(1)), int(m.group(2))
+    if not 1 <= first <= last <= 2 * SLOTS_IN_DAY:
+        return None
+    return (first - 1) // 2, (last - 1) // 2
 
 
 def clean_subject(subject: str) -> str:

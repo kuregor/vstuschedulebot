@@ -7,11 +7,10 @@ const SOURCE_URL = "https://www.vstu.ru/student/raspisanie-zanyatiy/";
 
 const TYPES = {
   lek: { label: "Лекция", color: "var(--lek)", tint: "var(--lek-tint)" },
-  sem: { label: "Семинар", color: "var(--sem)", tint: "var(--sem-tint)" },
+  sem: { label: "Практика", color: "var(--sem)", tint: "var(--sem-tint)" },
   lab: { label: "Лаба", color: "var(--lab)", tint: "var(--lab-tint)" },
-  other: { label: "Занятие", color: "var(--other)", tint: "var(--other-tint)" },
 };
-const TYPE_ORDER = ["lek", "sem", "lab", "other"];
+const TYPE_ORDER = ["lek", "sem", "lab"];
 const DOW = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"];
 const MONTHS_GEN = ["января", "февраля", "марта", "апреля", "мая", "июня",
   "июля", "августа", "сентября", "октября", "ноября", "декабря"];
@@ -26,7 +25,7 @@ const el = (tag, cls, text) => {
   if (text !== undefined) node.textContent = text;
   return node;
 };
-const paint = (type) => TYPES[type] || TYPES.other;
+const paint = (type) => TYPES[type] || TYPES.sem;
 const haptic = (style = "light") => tg?.HapticFeedback?.impactOccurred?.(style);
 
 /* ── данные ──────────────────────────────────────────────────────── */

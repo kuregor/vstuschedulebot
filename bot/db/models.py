@@ -32,7 +32,6 @@ class LessonType(str, enum.Enum):
     lek = "lek"
     sem = "sem"
     lab = "lab"
-    other = "other"
 
 
 class Group(Base):
@@ -77,7 +76,7 @@ class Lesson(Base):
     teacher: Mapped[str] = mapped_column(String(128), default="")
     room: Mapped[str] = mapped_column(String(32), default="")
     lesson_type: Mapped[LessonType] = mapped_column(
-        Enum(LessonType, name="lesson_type"), default=LessonType.other
+        Enum(LessonType, name="lesson_type"), default=LessonType.sem
     )
     raw_note: Mapped[str] = mapped_column(Text, default="")
 
