@@ -7,10 +7,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from ..config import settings
-from ..db.models import Group, Lesson
+from ..db.models import Group, Lesson, ProgramLevel, ScheduleSource
 from ..utils.formatting import (
     DOW_FULL,
     DOW_SHORT,
@@ -30,6 +30,88 @@ def semester_bounds() -> tuple[date, date]:
         date.fromisoformat(settings.semester_start),
         date.fromisoformat(settings.semester_end),
     )
+
+
+LEVEL_TITLES = [
+    (ProgramLevel.bachelor, "Бакалавриат"),
+    (ProgramLevel.master, "Магистратура"),
+]
+
+
+def _updated_label(moment: datetime | None) -> str:
+    if moment is None:
+        return ""
+    local = moment.astimezone() if moment.tzinfo else moment
+    return f"{local.day:02d}.{local.month:02d} в {local.hour:02d}:{local.minute:02d}"
+
+
+def source_json(source: ScheduleSource) -> dict:
+    return {
+        "url": source.url,
+        "dep": source.dep,
+        "level": source.program_level.value,
+        "faculty": source.faculty,
+        "course": source.course,
+        "title": source.title,
+        "file_name": source.file_name,
+        "enabled": source.enabled,
+        "status": source.status,
+        "message": source.message or "",
+        "groups": source.groups_count,
+        "lessons": source.lessons_count,
+        "updated": _updated_label(source.fetched_at),
+    }
+
+
+def settings_json(
+    sources: list[ScheduleSource],
+    groups: list[Group],
+    selected_group: Group | None,
+) -> dict:
+    """Данные экрана настроек: уровень -> факультет -> курс (файл) -> группа.
+
+    Факультеты собираются из самих файлов, а не из списка разделов сайта: у
+    магистратуры все расписания лежат на одной странице, и факультет там
+    известен только по названию файла («1 курс ФЭВТ»).
+    """
+    levels = []
+    for level, title in LEVEL_TITLES:
+        by_faculty: dict[str, dict] = {}
+        for source in sources:
+            if source.program_level is not level:
+                continue
+            key = source.faculty or source.dep
+            faculty = by_faculty.get(key)
+            if faculty is None:
+                faculty = by_faculty[key] = {
+                    "key": key,
+                    "short": source.faculty or source.dep_title,
+                    "title": source.dep_title,
+                    "files": [],
+                }
+            faculty["files"].append(source_json(source))
+        levels.append(
+            {
+                "key": level.value,
+                "title": title,
+                "faculties": sorted(by_faculty.values(), key=lambda f: f["short"]),
+            }
+        )
+
+    selected_source = selected_group.source if selected_group else None
+    return {
+        "levels": levels,
+        "groups": [{"id": g.id, "name": g.name} for g in groups],
+        "selected": {
+            "level": selected_source.program_level.value if selected_source else "",
+            "faculty": (selected_source.faculty or selected_source.dep)
+            if selected_source
+            else "",
+            "url": selected_source.url if selected_source else "",
+            "group_id": selected_group.id if selected_group else None,
+            "group_name": selected_group.name if selected_group else "",
+        },
+    }
 
 
 def group_json(group: Group) -> dict:

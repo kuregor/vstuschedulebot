@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -17,8 +18,9 @@ from aiogram.types import (
 
 from .config import settings
 from .db.session import SessionLocal, init_db
-from .handlers import admin_import, schedule
+from .handlers import schedule
 from .services import schedule_service as svc
+from .services import source_service
 from .webapp import public_url
 from .webapp.server import start_webapp
 
@@ -41,9 +43,6 @@ async def _set_commands(bot: Bot) -> None:
         [
             BotCommand(command="start", description="Открыть расписание"),
             BotCommand(command="app", description="Открыть приложение"),
-            BotCommand(command="schedule", description="Расписание текстом"),
-            BotCommand(command="group", description="Сменить группу"),
-            BotCommand(command="import", description="Загрузить расписание по ссылке"),
         ]
     )
 
@@ -105,6 +104,24 @@ async def _keep_menu_button(bot: Bot) -> None:
         await asyncio.sleep(POLL_PUBLIC_URL_SECONDS)
 
 
+async def _keep_schedules_fresh() -> None:
+    """Перекачивает выбранные в настройках расписания.
+
+    Учебный отдел правит файлы прямо на сайте, не меняя адресов, поэтому
+    свежесть даёт только повторная загрузка. Берём лишь то, что кто-то выбрал
+    в настройках: качать весь каталог университета незачем.
+    """
+    max_age = timedelta(hours=settings.refresh_hours)
+    while True:
+        try:
+            async with SessionLocal() as session:
+                await source_service.sync_catalog(session, force=True)
+            await source_service.refresh_enabled(max_age)
+        except Exception:  # сеть или сайт недоступны — попробуем на следующем круге
+            log.exception("Обновление расписаний не удалось")
+        await asyncio.sleep(settings.refresh_hours * 3600)
+
+
 async def main() -> None:
     if not settings.bot_token:
         raise SystemExit("Не задан BOT_TOKEN — заполните .env (см. .env.example)")
@@ -116,11 +133,11 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     dp = Dispatcher()
-    dp.include_router(admin_import.router)
     dp.include_router(schedule.router)
 
     await _set_commands(bot)
     menu_keeper = asyncio.create_task(_keep_menu_button(bot))
+    refresher = asyncio.create_task(_keep_schedules_fresh())
 
     # Веб-сервер Mini App живёт в том же процессе, что и бот.
     runner = await start_webapp()
@@ -129,6 +146,7 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         menu_keeper.cancel()
+        refresher.cancel()
         await runner.cleanup()
 
 

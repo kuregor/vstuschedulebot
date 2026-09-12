@@ -12,16 +12,6 @@ except ImportError:  # pragma: no cover
     pass
 
 
-def _env_list(name: str, default: str = "") -> list[int]:
-    raw = os.getenv(name, default)
-    out: list[int] = []
-    for part in raw.split(","):
-        part = part.strip()
-        if part.isdigit():
-            out.append(int(part))
-    return out
-
-
 @dataclass(frozen=True)
 class Settings:
     bot_token: str = field(default_factory=lambda: os.getenv("BOT_TOKEN", ""))
@@ -31,7 +21,10 @@ class Settings:
             "postgresql+asyncpg://schedule:schedule@localhost:5432/schedule",
         )
     )
-    admin_ids: list[int] = field(default_factory=lambda: _env_list("ADMIN_IDS"))
+    # Как часто перекачивать выбранные в настройках расписания с сайта ВолгГТУ.
+    refresh_hours: int = field(
+        default_factory=lambda: max(1, int(os.getenv("SCHEDULE_REFRESH_HOURS", "6")))
+    )
     # Границы семестра для расчёта конкретных дат занятий.
     semester_year: int = field(default_factory=lambda: int(os.getenv("SEMESTER_YEAR", "2026")))
     semester_start: str = field(default_factory=lambda: os.getenv("SEMESTER_START", "2026-09-01"))

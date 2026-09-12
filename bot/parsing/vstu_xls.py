@@ -1,4 +1,4 @@
-"""Парсер расписаний ВолгГТУ (.xls, формат "шахматка" учебного отдела).
+"""Парсер расписаний ВолгГТУ (.xls и .xlsx, формат "шахматка" учебного отдела).
 
 Структура листа (проверено на файле «ОН_Магистратура_1 курс ФЭВТ.xls»):
 
@@ -26,8 +26,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-import xlrd
-
 from .classify import (
     DATE_RE,
     TYPE_SEMINAR,
@@ -41,6 +39,7 @@ from .classify import (
 )
 from .dates import runs_biweekly
 from .grid import MergedGrid
+from .workbook import open_sheet
 
 DAY_NAMES = [
     "ПОНЕДЕЛЬНИК",
@@ -67,7 +66,29 @@ SLOTS_PER_DAY = len(SLOT_LABELS)
 ROWS_PER_DAY = ROWS_PER_SLOT * SLOTS_PER_DAY
 DAYS_PER_WEEK = len(DAY_NAMES)
 
-GROUP_NAME_RE = re.compile(r"^[А-ЯЁA-Z]{1,6}\s*-\s*\d+(?:\.\d+)?$")
+# Название группы: «САПР-1.4», «ИВТ -160», «Ф - 169», «СП - 1П»,
+# «ПП-351 (мясо)», «ППМ 2» (у магистратуры дефиса иногда нет),
+# «УТС-1н», «ФТКМ - 1Св» (хвост после номера бывает и строчными).
+# Уточнение в скобках и пробелы к названию не относятся: перед проверкой их
+# убираем, а показываем группу уже в опрятном виде. Одиночное случайное
+# совпадение не страшно — колонки групп ищутся по строке с наибольшим их числом.
+GROUP_NAME_RE = re.compile(r"^[А-ЯЁA-Z]{1,6}-?\d+(?:\.\d+)?[А-ЯЁA-Zа-яё]{0,2}$")
+
+
+def _group_core(text: str) -> str:
+    return re.sub(r"\([^)]*\)", "", text).replace(" ", "").strip()
+
+
+def is_group_name(text: str) -> bool:
+    return bool(GROUP_NAME_RE.match(_group_core(text)))
+
+
+def tidy_group_name(text: str) -> str:
+    """«ИВТ -160» -> «ИВТ-160», «ПП-351  (мясо)» -> «ПП-351 (мясо)»."""
+    out = re.sub(r"\s*-\s*", "-", text.strip(), count=1)
+    return re.sub(r"\s+", " ", out).strip()
+
+
 COURSE_RE = re.compile(r"(\d+)\s*курс", re.IGNORECASE)
 YEAR_RE = re.compile(r"(20\d{2})\s*[-–]\s*(20\d{2})")
 FACULTY_RE = re.compile(r"\b(Ф[А-ЯЁ]{2,5})\b")
@@ -145,28 +166,55 @@ def detect_program_level(header: str, filename: str = "") -> str:
     return LEVEL_BACHELOR
 
 
-def _find_group_columns(grid: MergedGrid) -> tuple[int, list[tuple[str, int]]]:
-    """Ищет строку заголовка с названиями групп -> (row, [(имя, колонка), ...])."""
+def _find_group_columns(
+    grid: MergedGrid, max_row: int | None = None
+) -> tuple[int, list[tuple[str, int]]]:
+    """Ищет строку заголовка с названиями групп -> (row, [(имя, колонка), ...]).
+
+    Искать разрешено только выше первого дня недели: ниже начинается сетка
+    занятий, а код аудитории («Б-602», «А 404») по форме от названия группы
+    не отличается, и строка с парой аудиторий перетянула бы заголовок на себя.
+    """
+    limit = min(grid.nrows, 40 if max_row is None else max_row)
     best: tuple[int, list[tuple[str, int]]] = (-1, [])
-    for r in range(0, min(grid.nrows, 40)):
+    for r in range(0, limit):
         found: list[tuple[str, int]] = []
         for c in range(0, grid.ncols):
             if not grid.is_top_left(r, c):
                 continue
             t = grid.text(r, c)
-            if t and GROUP_NAME_RE.match(t.replace(" ", "")):
-                found.append((t, c))
+            if t and is_group_name(t):
+                found.append((tidy_group_name(t), c))
         if len(found) > len(best[1]):
             best = (r, found)
     return best
 
 
-def _find_day_blocks(grid: MergedGrid) -> list[tuple[int, int, int]]:
+def find_day_column(grid: MergedGrid, limit: int = 8) -> int:
+    """Колонка с названиями дней недели.
+
+    У магистратуры дни стоят в колонке 0, у бакалавриата — в колонке 4: слева
+    от них четыре колонки с числами месяцев (Сентябрь … Декабрь). Колонку
+    ищем по числу попаданий в список дней, а не по фиксированному номеру.
+    """
+    best_col, best_hits = 0, 0
+    for c in range(0, min(limit, grid.ncols)):
+        hits = sum(
+            1
+            for r in range(0, grid.nrows)
+            if grid.text(r, c).upper().strip() in DAY_INDEX
+        )
+        if hits > best_hits:
+            best_col, best_hits = c, hits
+    return best_col
+
+
+def _find_day_blocks(grid: MergedGrid, day_col: int = 0) -> list[tuple[int, int, int]]:
     """-> [(week, weekday, row0), ...] в порядке появления в файле."""
     hits: list[tuple[int, int]] = []  # (row, weekday)
     for r in range(0, grid.nrows):
-        t = grid.text(r, 0).upper().strip()
-        if t in DAY_INDEX and grid.is_top_left(r, 0):
+        t = grid.text(r, day_col).upper().strip()
+        if t in DAY_INDEX and grid.is_top_left(r, day_col):
             hits.append((r, DAY_INDEX[t]))
     blocks: list[tuple[int, int, int]] = []
     for i, (row, weekday) in enumerate(hits):
@@ -302,6 +350,17 @@ def _parse_group_day(
             if current is not None and current["subject"] == subject:
                 # продолжение того же объединения (занятие на 4 часа) — не новая пара
                 continue
+            same_slot = (row - row0) // ROWS_PER_SLOT == (
+                current["row"] - row0
+            ) // ROWS_PER_SLOT if current is not None else False
+            if current is not None and same_slot and not current["teacher"]:
+                # Длинное название разбито по строкам отдельными ячейками
+                # («НЕОРГАНИЧЕСКАЯ» / «ХИМИЯ»). Внутри одной тройки строк двух
+                # разных пар быть не может, а преподаватель ещё не встретился —
+                # значит это продолжение названия, а не новое занятие.
+                current["subject"] = f"{current['subject']} {subject}".strip()
+                add_notes(notes)
+                continue
             flush(row - 1)
             span = grid.span(row, gc0)
             current = {
@@ -391,9 +450,7 @@ def assign_lesson_types(lessons: list[ParsedLesson]) -> None:
 
 
 def parse_workbook(path: str, filename: str = "") -> ParsedSchedule:
-    book = xlrd.open_workbook(path, formatting_info=True)
-    sheet = book.sheet_by_index(0)
-    grid = MergedGrid(sheet)
+    grid = MergedGrid(open_sheet(path))
 
     header = _header_text(grid)
     result = ParsedSchedule(title=header.strip()[:500])
@@ -409,14 +466,14 @@ def parse_workbook(path: str, filename: str = "") -> ParsedSchedule:
     if m:
         result.faculty = m.group(1)
 
-    header_row, group_cols = _find_group_columns(grid)
+    blocks = _find_day_blocks(grid, find_day_column(grid))
+    if not blocks:
+        raise ValueError("Не найдены блоки дней недели — формат файла не распознан")
+
+    header_row, group_cols = _find_group_columns(grid, max_row=blocks[0][2])
     if not group_cols:
         raise ValueError("Не найдена строка с названиями групп — формат файла не распознан")
     result.groups = [name for name, _ in group_cols]
-
-    blocks = _find_day_blocks(grid)
-    if not blocks:
-        raise ValueError("Не найдены блоки дней недели — формат файла не распознан")
 
     for idx, (name, gc0) in enumerate(group_cols):
         col_limit = group_cols[idx + 1][1] if idx + 1 < len(group_cols) else grid.ncols

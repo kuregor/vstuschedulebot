@@ -4,7 +4,8 @@
 всё это просто текст в соседних ячейках. Различаем по форме записи:
 
 * предмет      — ПОЛНОСТЬЮ ЗАГЛАВНЫМИ ("СИСТЕМНАЯ ИНЖЕНЕРИЯ", "ПРОФ. ИН-ЯЗ КОММУНИКАЦИЯ");
-* преподаватель — Фамилия + инициалы, иногда со званием ("доц. Кравченя П.Д.");
+* преподаватель — Фамилия с инициалами или без, иногда со званием
+                 ("доц. Кравченя П.Д.", "Бикус");
 * аудитория    — короткий код ("В-1302а", "408а", "329", "Б-602");
 * заметка      — даты ("14.09, 12.10, ..."), "занятия с 16.09", "лаб.", "9-12ч".
 """
@@ -20,10 +21,13 @@ FROM_DATE_RE = re.compile(r"занятия\s+с\s+(\d{1,2})\.(\d{1,2})", re.IGNO
 SUBGROUP_RE = re.compile(r"подгруппа|подгруппам", re.IGNORECASE)
 LAB_MARK_RE = re.compile(r"^лаб\.?$", re.IGNORECASE)
 
+# Инициалы необязательны: часть факультетов пишет в расписании одну фамилию
+# («Бикус», «Зорькин»). Фамилия — с заглавной и дальше строчными, поэтому
+# с названием предмета (оно целиком заглавными) такая запись не путается.
 TEACHER_RE = re.compile(
     r"^(?:доц\.?|проф\.?|ст\.?\s*пр\.?|асс\.?|преп\.?|ст\.?\s*преп\.?)?\s*"
-    r"[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?\s*"
-    r"[А-ЯЁ]\.\s*[А-ЯЁ]?\.?$"
+    r"[А-ЯЁ][а-яё]{2,}(?:-[А-ЯЁ][а-яё]+)?"
+    r"(?:\s*[А-ЯЁ]\.\s*[А-ЯЁ]?\.?)?$"
 )
 ROOM_RE = re.compile(r"^(?:[А-ЯЁA-Z]\s*-\s*)?\d{1,4}\s*[а-яёa-z]?(?:\s*-\s*\d)?$", re.IGNORECASE)
 
@@ -140,7 +144,40 @@ def hours_to_slots(note: str) -> tuple[int, int] | None:
     return (first - 1) // 2, (last - 1) // 2
 
 
+def collapse_letter_spacing(text: str) -> str:
+    """«Н  Е  О  Р  Г  ...    Х  И  М  И  Я» -> «НЕОРГАНИЧЕСКАЯ ХИМИЯ».
+
+    Часть факультетов растягивает заголовок пробелами между буквами, чтобы он
+    заполнил ячейку. Ширина пробела при этом разная: между буквами одного
+    слова — узкая, между словами — заметно шире. Поэтому граница слова ищется
+    не по фиксированному числу пробелов, а по самому большому скачку между
+    встретившимися ширинами: если ни одного скачка нет, перед нами одно слово.
+    """
+    parts = re.findall(r"\S+|\s+", text)
+    words = [p for p in parts if not p.isspace()]
+    if len(words) < 5 or sum(len(w) == 1 for w in words) / len(words) < 0.7:
+        return text
+
+    widths = sorted({len(p) for p in parts if p.isspace()})
+    if not widths:
+        return text
+    split_at = None
+    best_ratio = 2.0  # меньший разброс шириной слова не считаем
+    for small, large in zip(widths, widths[1:]):
+        if large / small >= best_ratio:
+            best_ratio, split_at = large / small, large
+
+    out: list[str] = []
+    for part in parts:
+        if not part.isspace():
+            out.append(part)
+        elif split_at is not None and len(part) >= split_at:
+            out.append(" ")
+    return "".join(out).strip()
+
+
 def clean_subject(subject: str) -> str:
     """Убирает служебные суффиксы типа '(лекция)' из названия предмета."""
     out = re.sub(r"\s*\((?:лекц\w*|лаб\w*|практ\w*|сем\w*)\.?\)\s*", " ", subject, flags=re.IGNORECASE)
+    out = collapse_letter_spacing(out)
     return re.sub(r"\s+", " ", out).strip()

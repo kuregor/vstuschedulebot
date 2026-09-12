@@ -1,6 +1,7 @@
-"""Импорт расписания: ссылка или файл .xls -> разбор -> запись в БД."""
+"""Импорт расписания: ссылка на файл с сайта -> разбор -> запись в БД."""
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from ..config import settings
 from ..db.models import Group, ImportLog, Lesson, LessonDate, LessonType, ProgramLevel
 from ..parsing.dates import lesson_dates
 from ..parsing.vstu_xls import LEVEL_MASTER, ParsedSchedule, parse_workbook
+from ..parsing.workbook import OLE_MAGIC, ZIP_MAGIC
 
 DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=60)
 MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -51,27 +53,50 @@ async def download_xls(url: str) -> tuple[str, str]:
     async with aiohttp.ClientSession(timeout=DOWNLOAD_TIMEOUT) as session:
         async with session.get(url) as resp:
             resp.raise_for_status()
-            data = await resp.content.read(MAX_FILE_BYTES + 1)
-    if len(data) > MAX_FILE_BYTES:
-        raise ValueError("Файл слишком большой (> 20 МБ)")
-    if not data.startswith(b"\xd0\xcf\x11\xe0"):
+            # Читаем кусками до конца ответа. Не `content.read(n)`: он отдаёт
+            # столько, сколько уже пришло, и книга приезжала обрезанной по
+            # первому буферу — примерно 16 КБ вместо сотни.
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in resp.content.iter_chunked(64 * 1024):
+                size += len(chunk)
+                if size > MAX_FILE_BYTES:
+                    raise ValueError("Файл слишком большой (> 20 МБ)")
+                chunks.append(chunk)
+    data = b"".join(chunks)
+    if not data.startswith((OLE_MAGIC, ZIP_MAGIC)):
         raise ValueError(
-            "Это не файл .xls (ожидался формат Excel 97-2003). "
+            "По ссылке не книга Excel (ожидался .xls или .xlsx). "
             "Проверьте ссылку — она должна вести прямо на файл расписания."
         )
-    fd, path = tempfile.mkstemp(suffix=".xls")
+    suffix = ".xlsx" if data.startswith(ZIP_MAGIC) else ".xls"
+    fd, path = tempfile.mkstemp(suffix=suffix)
     with os.fdopen(fd, "wb") as fh:
         fh.write(data)
     return path, filename
 
 
 async def save_schedule(
-    session: AsyncSession, parsed: ParsedSchedule, source: str
+    session: AsyncSession,
+    parsed: ParsedSchedule,
+    source: str,
+    *,
+    level: ProgramLevel | None = None,
+    faculty: str = "",
+    course: int | None = None,
+    source_id: int | None = None,
 ) -> ImportResult:
-    """Перезаписывает расписание разобранных групп (старые занятия удаляются)."""
-    level = (
+    """Перезаписывает расписание разобранных групп (старые занятия удаляются).
+
+    Уровень, факультет и курс можно передать снаружи: когда файл взят с сайта,
+    его раздел известен точно, а по шапке файла они определяются лишь на глаз
+    (в «3 курс ФАСТиВ» из текста извлекается «ФИЗ» — кусок слова «ФИЗИКА»).
+    """
+    level = level or (
         ProgramLevel.master if parsed.program_level == LEVEL_MASTER else ProgramLevel.bachelor
     )
+    faculty = faculty or parsed.faculty
+    course = course or parsed.course
     sem_start, sem_end = _semester_bounds()
 
     groups: dict[str, Group] = {}
@@ -82,8 +107,10 @@ async def save_schedule(
         if group is None:
             group = Group(name=name, program_level=level)
             session.add(group)
-        group.faculty = parsed.faculty or group.faculty
-        group.course = parsed.course or group.course
+        group.faculty = faculty or group.faculty
+        group.course = course or group.course
+        if source_id is not None:
+            group.source_id = source_id
         groups[name] = group
     await session.flush()
 
@@ -127,8 +154,8 @@ async def save_schedule(
         ImportLog(
             source=source,
             program_level=level,
-            faculty=parsed.faculty,
-            course=parsed.course,
+            faculty=faculty,
+            course=course,
             groups_count=len(groups),
             lessons_count=len(parsed.lessons),
             status="ok",
@@ -139,8 +166,8 @@ async def save_schedule(
 
     return ImportResult(
         program_level=level,
-        faculty=parsed.faculty,
-        course=parsed.course,
+        faculty=faculty,
+        course=course,
         groups=parsed.groups,
         lessons_count=len(parsed.lessons),
         dates_count=dates_count,
@@ -148,17 +175,20 @@ async def save_schedule(
     )
 
 
-async def import_from_url(session: AsyncSession, url: str) -> ImportResult:
+async def parse_in_thread(path: str, filename: str) -> ParsedSchedule:
+    """Разбор книги в отдельном потоке.
+
+    Шахматка на тысячу строк считается заметное время, а поток выполнения у
+    бота и веб-сервера общий: в нём разбор останавливал бы и ответы Telegram,
+    и отдачу приложения.
+    """
+    return await asyncio.to_thread(parse_workbook, path, filename)
+
+
+async def import_from_url(session: AsyncSession, url: str, **overrides) -> ImportResult:
     path, filename = await download_xls(url)
     try:
-        parsed = parse_workbook(path, filename)
-        return await save_schedule(session, parsed, source=url)
+        parsed = await parse_in_thread(path, filename)
+        return await save_schedule(session, parsed, source=url, **overrides)
     finally:
         os.unlink(path)
-
-
-async def import_from_file(
-    session: AsyncSession, path: str, filename: str
-) -> ImportResult:
-    parsed = parse_workbook(path, filename)
-    return await save_schedule(session, parsed, source=filename)

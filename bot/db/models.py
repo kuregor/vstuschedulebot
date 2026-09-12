@@ -6,6 +6,7 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     Date,
     DateTime,
     Enum,
@@ -34,6 +35,38 @@ class LessonType(str, enum.Enum):
     lab = "lab"
 
 
+class ScheduleSource(Base):
+    """Файл расписания на сайте ВолгГТУ.
+
+    Каталог сайта целиком складывается сюда, а `enabled` отмечает то, что
+    пользователи выбрали в настройках приложения: именно эти файлы бот
+    скачивает и потом обновляет сам.
+    """
+
+    __tablename__ = "schedule_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    url: Mapped[str] = mapped_column(String(500), unique=True, index=True)
+    dep: Mapped[str] = mapped_column(String(16), index=True)  # fevt, mag, ...
+    dep_title: Mapped[str] = mapped_column(String(128), default="")
+    faculty: Mapped[str] = mapped_column(String(32), default="")  # ФЭВТ
+    program_level: Mapped[ProgramLevel] = mapped_column(
+        Enum(ProgramLevel, name="program_level"), index=True
+    )
+    course: Mapped[int | None] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(128), default="")  # «2 курс»
+    file_name: Mapped[str] = mapped_column(String(255), default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # new — ещё не скачивали, loading — качаем прямо сейчас, ok, error
+    status: Mapped[str] = mapped_column(String(16), default="new")
+    message: Mapped[str] = mapped_column(Text, default="")
+    groups_count: Mapped[int] = mapped_column(Integer, default=0)
+    lessons_count: Mapped[int] = mapped_column(Integer, default=0)
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    groups: Mapped[list["Group"]] = relationship(back_populates="source")
+
+
 class Group(Base):
     __tablename__ = "groups"
     __table_args__ = (UniqueConstraint("name", "program_level", name="uq_group_name_level"),)
@@ -45,6 +78,9 @@ class Group(Base):
     )
     faculty: Mapped[str | None] = mapped_column(String(32))
     course: Mapped[int | None] = mapped_column(Integer)
+    source_id: Mapped[int | None] = mapped_column(
+        ForeignKey("schedule_sources.id", ondelete="SET NULL"), index=True
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -52,6 +88,7 @@ class Group(Base):
     lessons: Mapped[list["Lesson"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
     )
+    source: Mapped[ScheduleSource | None] = relationship(back_populates="groups")
 
     @property
     def level_title(self) -> str:

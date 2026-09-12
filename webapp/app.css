@@ -46,14 +46,7 @@ body::-webkit-scrollbar, .body::-webkit-scrollbar { width: 0; height: 0; }
 .topbar-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
 .title-col { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 
-.group-btn {
-  display: flex; align-items: center; gap: 6px;
-  border: 0; background: transparent; padding: 0; cursor: pointer;
-  font-family: inherit; color: var(--ink);
-  font-size: 26px; font-weight: 800; letter-spacing: -0.5px; line-height: 1;
-}
-.group-btn .caret { font-size: 13px; opacity: 0.45; transform: translateY(1px); }
-.group-btn:active { opacity: 0.6; }
+.screen-title { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; line-height: 1; }
 
 .subtitle { font-size: 11px; font-weight: 500; color: rgba(23, 22, 26, 0.55); }
 
@@ -255,16 +248,52 @@ body::-webkit-scrollbar, .body::-webkit-scrollbar { width: 0; height: 0; }
 }
 .close-btn:active { opacity: 0.85; }
 
-/* выбор группы */
-.level-title { font-size: 10px; font-weight: 800; letter-spacing: 0.5px; color: rgba(23, 22, 26, 0.5); margin: 14px 0 8px; }
-.group-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
-.group-chip {
-  border: 1px solid rgba(23, 22, 26, 0.1); background: var(--chip); color: var(--ink);
-  border-radius: 11px; padding: 11px 6px; cursor: pointer;
-  font-family: inherit; font-size: 12.5px; font-weight: 700;
+/* вкладка «Настройки» */
+.set { padding: 14px 14px 96px; display: flex; flex-direction: column; gap: 14px; }
+.set-card { background: var(--card); border: 1px solid rgba(23, 22, 26, 0.08); border-radius: 16px; }
+.set-card > .set-cap { padding: 14px 13px 10px; }
+.set-cap { font-size: 10px; font-weight: 800; letter-spacing: 0.5px; color: rgba(23, 22, 26, 0.5); }
+.set-card > .seg { margin: 0 13px 13px; }
+
+.set-rows { display: flex; flex-direction: column; padding: 4px 0; }
+.set-row {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  border: 0; background: transparent; cursor: pointer; text-align: left;
+  padding: 12px 13px; font-family: inherit; color: var(--ink);
 }
-.group-chip.on { background: var(--ink); color: var(--card); border-color: var(--ink); }
-.group-chip:active { opacity: 0.8; }
+.set-row + .set-row { border-top: 1px solid rgba(23, 22, 26, 0.07); }
+.set-row:active { background: rgba(23, 22, 26, 0.03); }
+.set-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 86px; max-width: 52%; }
+.set-row .label { font-size: 13px; font-weight: 700; }
+.set-row .hint { font-size: 10.5px; font-weight: 500; color: rgba(23, 22, 26, 0.5); line-height: 1.25; }
+.set-row .value {
+  flex: 1; min-width: 0; text-align: right; font-size: 12.5px; font-weight: 600;
+  color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.set-row .chev {
+  width: 7px; height: 7px; flex: none; transform: rotate(45deg);
+  border-top: 2px solid rgba(23, 22, 26, 0.35); border-right: 2px solid rgba(23, 22, 26, 0.35);
+}
+.set-note { font-size: 11px; font-weight: 500; color: rgba(23, 22, 26, 0.55); line-height: 1.45; padding: 0 4px; }
+.set-note a { color: var(--accent); font-weight: 600; text-decoration: none; }
+
+/* шторка выбора: факультет, курс, группа */
+.opt-list { display: flex; flex-direction: column; gap: 4px; max-height: 58vh; overflow: auto; }
+.opt {
+  display: flex; align-items: center; gap: 10px; width: 100%; cursor: pointer;
+  border: 1px solid rgba(23, 22, 26, 0.08); background: var(--card);
+  border-radius: 12px; padding: 12px 13px; font-family: inherit; text-align: left;
+}
+.opt.on { background: oklch(0.97 0.02 155); border-color: rgba(61, 107, 87, 0.4); }
+.opt:active { filter: brightness(0.97); }
+.opt-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.opt-label { font-size: 13px; font-weight: 700; color: var(--ink); }
+.opt-sub { font-size: 11px; font-weight: 500; color: rgba(23, 22, 26, 0.6); text-wrap: pretty; }
+.opt-ring {
+  width: 18px; height: 18px; border-radius: 50%; flex: none;
+  border: 2px solid rgba(23, 22, 26, 0.2); background: transparent;
+}
+.opt.on .opt-ring { border-color: var(--accent); background: var(--accent); box-shadow: inset 0 0 0 3px var(--card); }
 
 /* состояния загрузки и ошибки */
 .state { padding: 60px 24px; text-align: center; color: rgba(23, 22, 26, 0.6); font-size: 13px; font-weight: 600; }

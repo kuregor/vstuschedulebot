@@ -3,4 +3,5 @@ SQLAlchemy[asyncio]
 asyncpg
 aiohttp
 xlrd
+openpyxl
 python-dotenv

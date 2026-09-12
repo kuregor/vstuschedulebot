@@ -12,6 +12,7 @@ from bot.parsing.classify import (
     TYPE_SEMINAR,
     classify_cell,
     clean_subject,
+    collapse_letter_spacing,
     hours_to_slots,
     lesson_type,
     marked_as_lecture,
@@ -22,7 +23,13 @@ from bot.parsing.dates import (
     recurring_dates,
     runs_biweekly,
 )
-from bot.parsing.vstu_xls import ParsedLesson, assign_lesson_types, detect_program_level
+from bot.parsing.vstu_xls import (
+    ParsedLesson,
+    assign_lesson_types,
+    detect_program_level,
+    is_group_name,
+    tidy_group_name,
+)
 
 SEM_START = date(2026, 9, 1)  # вторник
 SEM_END = date(2026, 12, 31)
@@ -194,3 +201,38 @@ def test_lesson_dates_respects_start_date_note():
 def test_lesson_dates_prefers_explicit_list():
     got = lesson_dates("30.09, 28.10", weekday=3, week=1, semester_start=SEM_START, semester_end=SEM_END)
     assert got == [date(2026, 9, 30), date(2026, 10, 28)]
+
+
+def test_teacher_may_come_without_initials():
+    # часть факультетов пишет в расписании одну фамилию
+    assert classify_cell("Бикус") == "teacher"
+    assert classify_cell("доц. Кравченя П.Д.") == "teacher"
+    # название предмета заглавными за преподавателя не принимаем
+    assert classify_cell("ХИМИЯ") == "subject"
+
+
+def test_letter_spaced_titles_are_collapsed():
+    assert collapse_letter_spacing(
+        "Н    Е   О    Р    Г    А    Н    И    Ч    Е    С    К     А     Я"
+        "                      Х    И    М    И    Я"
+    ) == "НЕОРГАНИЧЕСКАЯ ХИМИЯ"
+    # один разрядкой набранный термин остаётся одним словом
+    assert collapse_letter_spacing(
+        "Ф         И         Л         О         С         О         Ф         И         Я"
+    ) == "ФИЛОСОФИЯ"
+    # обычное название не трогаем
+    assert collapse_letter_spacing("МАТЕМАТИЧЕСКИЙ АНАЛИЗ") == "МАТЕМАТИЧЕСКИЙ АНАЛИЗ"
+
+
+def test_group_names_of_all_faculties():
+    for name in ["САПР-1.4", "ИВТ -160", "Ф - 169", "СП - 1П", "ПП-351 (мясо)",
+                 "ППМ 2", "УТС-1н", "ФТКМ - 1Св"]:
+        assert is_group_name(name), name
+    for name in ["Сентябрь", "ПОНЕДЕЛЬНИК", "1- 2", "ФИЗИКА", ""]:
+        assert not is_group_name(name), name
+
+
+def test_group_name_is_tidied_for_display():
+    assert tidy_group_name("ИВТ -160") == "ИВТ-160"
+    assert tidy_group_name("Ф - 169") == "Ф-169"
+    assert tidy_group_name("ПП-351  (мясо)") == "ПП-351 (мясо)"

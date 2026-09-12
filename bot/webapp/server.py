@@ -7,11 +7,11 @@ from pathlib import Path
 from aiohttp import web
 
 from ..config import settings
-from ..db.models import ProgramLevel
 from ..db.session import SessionLocal
 from ..services import schedule_service as svc
+from ..services import source_service as sources_svc
 from . import public_url
-from .api import group_json, schedule_json
+from .api import schedule_json, settings_json, source_json
 from .auth import InitDataError, user_id_from_init_data
 
 log = logging.getLogger(__name__)
@@ -40,26 +40,47 @@ def _user_id(request: web.Request) -> int | None:
         raise web.HTTPUnauthorized(text=f"Проверка Telegram не пройдена: {exc}") from exc
 
 
-async def handle_groups(request: web.Request) -> web.Response:
+async def handle_settings(request: web.Request) -> web.Response:
+    """Экран настроек: каталог сайта, состояние загрузок и текущий выбор."""
     user_id = _user_id(request)
     async with SessionLocal() as session:
-        groups = await svc.list_groups(session)
+        sources = await sources_svc.sync_catalog(session)
         selected = None
         if user_id is not None:
             user = await svc.get_user(session, user_id)
-            selected = user.group_id if user else None
-    payload = {
-        "selected": selected,
-        "levels": [
+            selected = user.group if user and user.group_id else None
+        groups = (
+            await sources_svc.groups_of_source(session, selected.source_id)
+            if selected is not None and selected.source_id
+            else []
+        )
+        return web.json_response(settings_json(sources, groups, selected))
+
+
+async def handle_pick_source(request: web.Request) -> web.Response:
+    """Выбор файла расписания в настройках: включаем и сразу загружаем."""
+    _user_id(request)
+    body = await request.json()
+    url = str(body.get("url", "")).strip()
+    if not url:
+        raise web.HTTPBadRequest(text="Не указан файл расписания")
+
+    async with SessionLocal() as session:
+        source = await sources_svc.get_source(session, url)
+        if source is None:
+            raise web.HTTPNotFound(text="Такого расписания нет в каталоге сайта")
+        source = await sources_svc.set_enabled(session, url, True)
+        if source is None:
+            raise web.HTTPNotFound(text="Такого расписания нет в каталоге сайта")
+        if bool(body.get("reload")) and source.status == sources_svc.STATUS_OK:
+            source = await sources_svc.load_source(session, source)
+        groups = await sources_svc.groups_of_source(session, source.id)
+        return web.json_response(
             {
-                "level": level.value,
-                "title": "Бакалавриат" if level is ProgramLevel.bachelor else "Магистратура",
-                "groups": [group_json(g) for g in groups if g.program_level is level],
+                "source": source_json(source),
+                "groups": [{"id": g.id, "name": g.name} for g in groups],
             }
-            for level in (ProgramLevel.bachelor, ProgramLevel.master)
-        ],
-    }
-    return web.json_response(payload)
+        )
 
 
 async def handle_schedule(request: web.Request) -> web.Response:
@@ -72,13 +93,15 @@ async def handle_schedule(request: web.Request) -> web.Response:
         else:
             user = await svc.get_user(session, user_id) if user_id is not None else None
             group = user.group if user and user.group_id else None
-            if group is None:
-                groups = await svc.list_groups(session)
-                group = groups[0] if groups else None
 
         if group is None:
+            # Группа выбирается в настройках — туда и отправляем.
             return web.json_response(
-                {"empty": True, "message": "Расписание ещё не загружено"}
+                {
+                    "empty": True,
+                    "message": "Откройте «Настройки» и выберите факультет, курс и группу — "
+                    "расписание загрузится с сайта ВолгГТУ.",
+                }
             )
 
         lessons = await svc.lessons_of_group(session, group.id)
@@ -124,8 +147,9 @@ def create_app() -> web.Application:
         [
             web.get("/", handle_index),
             web.get("/api/health", handle_health),
-            web.get("/api/groups", handle_groups),
             web.get("/api/schedule", handle_schedule),
+            web.get("/api/settings", handle_settings),
+            web.post("/api/source", handle_pick_source),
             web.post("/api/group", handle_select_group),
             web.static("/static", STATIC_DIR),
         ]

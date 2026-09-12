@@ -16,7 +16,11 @@ const MONTHS_GEN = ["января", "февраля", "марта", "апрел�
   "июля", "августа", "сентября", "октября", "ноября", "декабря"];
 const DOW_FULL = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"];
 
-const state = { tab: "list", filter: "both", data: null, lessons: new Map(), sheet: null };
+const state = {
+  tab: "list", filter: "both", data: null, lessons: new Map(), sheet: null,
+  // экран настроек: каталог сайта, открытая шторка выбора и то, что в ней листают
+  settings: null, picker: null, level: "", faculty: "", busy: false,
+};
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => {
@@ -56,27 +60,40 @@ function renderTopbar() {
   const bar = $("topbar");
   bar.replaceChildren();
   const data = state.data;
-  if (!data || data.empty) return;
+  const loaded = data && !data.empty;
 
   const row = el("div", "topbar-row");
   const titles = el("div", "title-col");
 
-  const groupBtn = el("button", "group-btn");
-  groupBtn.append(el("span", null, data.group.name), el("span", "caret", "▾"));
-  groupBtn.onclick = () => { haptic(); openGroupPicker(); };
+  // Группа выбирается в настройках, поэтому в шапке это просто заголовок.
+  // Дефис в названии заменён тонким пробелом — так в макете: «САПР 1.4».
+  let title = "Расписание";
+  let sub = "Группа не выбрана";
+  if (state.tab === "settings") {
+    title = "Настройки";
+    sub = "Учебная группа";
+  } else if (loaded) {
+    title = data.group.name.replace("-", " ");
+    sub = [data.group.level_title, data.group.course ? `${data.group.course} курс` : "",
+      data.group.faculty, data.semester.title].filter(Boolean).join(" · ");
+  }
+  titles.append(el("div", "screen-title", title), el("div", "subtitle", sub));
+  row.append(titles);
 
-  const sub = [data.group.level_title, data.group.course ? `${data.group.course} курс` : "",
-    data.group.faculty, data.semester.title].filter(Boolean).join(" · ");
-  titles.append(groupBtn, el("div", "subtitle", sub));
-
-  const now = el("div", "now-col");
-  now.append(el("div", "now-label", "СЕЙЧАС"),
-    el("div", "now-week", `Неделя ${data.semester.current_week}`));
-
-  row.append(titles, now);
+  if (loaded) {
+    const now = el("div", "now-col");
+    now.append(el("div", "now-label", "СЕЙЧАС"),
+      el("div", "now-week", `Неделя ${data.semester.current_week}`));
+    row.append(now);
+  }
   bar.append(row);
 
-  if (state.tab === "list") {
+  if (state.tab === "settings") {
+    syncTopbarHeight();
+    return;
+  }
+
+  if (state.tab === "list" && loaded) {
     const seg = el("div", "seg");
     [["both", "Обе недели"], ["1", "1-я"], ["2", "2-я"]].forEach(([key, label]) => {
       const btn = el("button", state.filter === key ? "on" : null, label);
@@ -84,12 +101,17 @@ function renderTopbar() {
       seg.append(btn);
     });
     bar.append(seg);
-  } else {
+  } else if (loaded) {
     const busy = el("div", "busy-row");
     busy.append(el("span", "label", "Занято дней:"),
       el("span", "value", `${data.busy.days} / ${data.busy.study_days}`),
       el("span", "year", String(new Date(data.semester.start).getFullYear())));
     bar.append(busy);
+  }
+
+  if (!loaded) {
+    syncTopbarHeight();
+    return;
   }
 
   const legend = el("div", "legend");
@@ -389,27 +411,198 @@ function openDaySheet(isoDate, ids) {
   });
 }
 
-async function openGroupPicker() {
-  const data = await api("/api/groups");
-  openSheet((sheet) => {
-    sheet.append(el("div", "sheet-title", "Выберите группу"));
-    data.levels.filter((level) => level.groups.length).forEach((level) => {
-      sheet.append(el("div", "level-title", level.title.toUpperCase()));
-      const grid = el("div", "group-grid");
-      level.groups.forEach((group) => {
-        const chip = el("button",
-          `group-chip${group.id === state.data?.group?.id ? " on" : ""}`, group.name);
-        chip.onclick = async () => {
-          haptic("medium");
-          closeSheet();
-          showLoading();
-          await loadSchedule(group.id);
-        };
-        grid.append(chip);
-      });
-      sheet.append(grid);
-    });
+/* ── вкладка «Настройки» ─────────────────────────────────────────── */
+
+/* Уровень -> факультет -> курс — это и есть конкретный файл на сайте
+   ВолгГТУ. Выбрали курс — бот скачивает файл и разбирает его, после чего
+   в строке «Группа» появляются группы именно из этого файла. */
+
+async function loadSettings() {
+  state.settings = await api("/api/settings");
+  const picked = state.settings.selected;
+  state.level = state.level || picked.level || state.settings.levels[0]?.key || "";
+  state.faculty = state.faculty || picked.faculty || "";
+  if (!currentFaculty()) state.faculty = facultiesOf(state.level)[0]?.key || "";
+}
+
+const levelsOf = () => state.settings?.levels || [];
+const facultiesOf = (levelKey) =>
+  levelsOf().find((l) => l.key === levelKey)?.faculties || [];
+const currentFaculty = () =>
+  facultiesOf(state.level).find((f) => f.key === state.faculty) || null;
+const currentFiles = () => currentFaculty()?.files || [];
+const currentFile = () =>
+  currentFiles().find((f) => f.url === state.settings?.selected.url) || null;
+
+function statusLine(file) {
+  if (!file) return "";
+  if (file.status === "error") return `не загрузилось: ${file.message}`;
+  if (file.status === "ok") {
+    const when = file.updated ? `, обновлено ${file.updated}` : "";
+    return `${file.groups} групп, ${file.lessons} пар${when}`;
+  }
+  return "ещё не загружено";
+}
+
+function settingsRow(label, value, hint, onClick) {
+  const row = el("button", "set-row");
+  const left = el("div", "set-row-main");
+  left.append(el("div", "label", label));
+  if (hint) left.append(el("div", "hint", hint));
+  row.append(left, el("div", "value", value || "не выбрано"), el("span", "chev"));
+  row.onclick = () => { haptic(); onClick(); };
+  return row;
+}
+
+function renderSettings() {
+  const view = $("view");
+  const wrap = el("div", "set");
+  const settings = state.settings;
+
+  if (!settings) {
+    view.replaceChildren(loadingBox("Читаем каталог сайта…"));
+    return;
+  }
+
+  const levelCard = el("div", "set-card");
+  levelCard.append(el("div", "set-cap", "УРОВЕНЬ ОБРАЗОВАНИЯ"));
+  const seg = el("div", "seg");
+  levelsOf().forEach((level) => {
+    const btn = el("button", state.level === level.key ? "on" : null, level.title);
+    btn.onclick = () => {
+      haptic();
+      state.level = level.key;
+      state.faculty = facultiesOf(level.key)[0]?.key || "";
+      render();
+    };
+    seg.append(btn);
   });
+  levelCard.append(seg);
+  wrap.append(levelCard);
+
+  const faculty = currentFaculty();
+  const file = currentFile();
+  const selectedGroup = settings.groups.find((g) => g.id === settings.selected.group_id);
+
+  const rows = el("div", "set-card set-rows");
+  rows.append(settingsRow("Факультет", faculty ? faculty.short : "", faculty?.title,
+    () => openPicker("faculty")));
+  rows.append(settingsRow("Курс", file ? file.title : "", statusLine(file),
+    () => openPicker("course")));
+  rows.append(settingsRow("Группа", selectedGroup ? selectedGroup.name : "",
+    settings.groups.length ? `${settings.groups.length} групп в файле` : "сначала выберите курс",
+    () => openPicker("group")));
+  wrap.append(rows);
+
+  const note = el("div", "set-note");
+  note.append(el("div", null,
+    "Расписание берётся с сайта ВолгГТУ и обновляется само — выбранный файл "
+    + "бот перекачивает несколько раз в сутки."));
+  const link = el("a", null, "открыть раздел расписаний на сайте");
+  link.href = SOURCE_URL;
+  link.target = "_blank";
+  link.rel = "noopener";
+  note.append(link);
+  wrap.append(note);
+
+  view.replaceChildren(wrap);
+}
+
+function optionNode(label, sub, selected, onClick) {
+  const btn = el("button", `opt${selected ? " on" : ""}`);
+  const text = el("span", "opt-text");
+  text.append(el("span", "opt-label", label));
+  if (sub) text.append(el("span", "opt-sub", sub));
+  btn.append(text, el("span", "opt-ring"));
+  btn.onclick = onClick;
+  return btn;
+}
+
+function openPicker(kind) {
+  const settings = state.settings;
+  if (!settings) return;
+
+  const build = (sheet) => {
+    let title = "";
+    const list = el("div", "opt-list");
+
+    if (kind === "faculty") {
+      title = "Факультет";
+      facultiesOf(state.level).forEach((f) => {
+        list.append(optionNode(f.short, f.title, f.key === state.faculty, () => {
+          haptic("medium");
+          state.faculty = f.key;
+          closeSheet();
+          render();
+        }));
+      });
+    }
+
+    if (kind === "course") {
+      title = "Курс";
+      currentFiles().forEach((f) => {
+        list.append(optionNode(f.title, statusLine(f), f.url === settings.selected.url,
+          () => { haptic("medium"); closeSheet(); pickFile(f); }));
+      });
+    }
+
+    if (kind === "group") {
+      title = "Группа";
+      if (!settings.groups.length) {
+        list.append(el("div", "free-day", "Сначала выберите курс — бот загрузит файл расписания."));
+      }
+      settings.groups.forEach((g) => {
+        list.append(optionNode(g.name, "", g.id === settings.selected.group_id,
+          () => { haptic("medium"); closeSheet(); pickGroup(g); }));
+      });
+    }
+
+    sheet.append(el("div", "sheet-title", title), list);
+  };
+
+  openSheet(build);
+}
+
+async function pickFile(file) {
+  state.busy = true;
+  $("view").replaceChildren(loadingBox("Скачиваем расписание с сайта ВолгГТУ…"));
+  try {
+    const resp = await api("/api/source", {
+      method: "POST",
+      body: JSON.stringify({ url: file.url }),
+    });
+    // settings перечитываем целиком: у источника изменились статус и счётчики
+    await loadSettings();
+    state.settings.selected.url = resp.source.url;
+    state.settings.groups = resp.groups;
+    if (resp.source.status === "error") {
+      state.settings.selected.group_id = null;
+    }
+  } catch (err) {
+    showError(explainFailure(err));
+    state.busy = false;
+    return;
+  }
+  state.busy = false;
+  render();
+  if (state.settings.groups.length) openPicker("group");
+}
+
+async function pickGroup(group) {
+  state.busy = true;
+  $("view").replaceChildren(loadingBox("Загружаем расписание…"));
+  try {
+    await api("/api/group", {
+      method: "POST",
+      body: JSON.stringify({ group_id: group.id }),
+    });
+    state.settings.selected.group_id = group.id;
+    await loadSchedule(group.id);
+  } catch (err) {
+    showError(explainFailure(err));
+  } finally {
+    state.busy = false;
+  }
 }
 
 /* ── каркас ──────────────────────────────────────────────────────── */
@@ -417,36 +610,59 @@ async function openGroupPicker() {
 function renderTabs() {
   const bar = $("tabbar");
   bar.replaceChildren();
-  [["list", "Расписание"], ["cal", "Календарь"]].forEach(([key, label]) => {
+  [["list", "Расписание"], ["cal", "Календарь"], ["settings", "Настройки"]].forEach(([key, label]) => {
     const btn = el("button", state.tab === key ? "on" : null);
     btn.append(el("span", "icon"), el("span", "label", label));
-    btn.onclick = () => { haptic(); state.tab = key; render(); };
+    btn.onclick = () => { haptic(); openTab(key); };
     bar.append(btn);
   });
 }
 
+function openTab(key) {
+  state.tab = key;
+  render();
+  // Каталог сайта читается при первом заходе в настройки, а не на старте:
+  // тому, у кого группа уже выбрана, эти запросы ни к чему.
+  if (key === "settings" && !state.settings) {
+    loadSettings().then(render).catch((err) => showError(explainFailure(err)));
+  }
+}
+
 function render() {
   const data = state.data;
-  if (data?.empty) {
-    $("topbar").replaceChildren();
-    $("tabbar").replaceChildren();
-    const box = el("div", "state");
-    box.append(el("b", null, "Расписание не загружено"),
-      el("div", null, "Отправьте боту ссылку на файл .xls командой /import"));
-    $("view").replaceChildren(box);
-    return;
-  }
+  // Вкладки рисуем всегда: даже когда расписания ещё нет, из приложения
+  // нужно попасть в настройки и выбрать его.
   renderTopbar();
   renderTabs();
-  if (state.tab === "list") renderList(); else renderCalendar();
+
+  if (state.tab === "settings") {
+    renderSettings();
+  } else if (!data || data.empty) {
+    const box = el("div", "state");
+    box.append(el("b", null, "Расписание не выбрано"),
+      el("div", null, data?.message || "Откройте «Настройки» и выберите факультет, курс и группу."));
+    const go = el("button", "close-btn", "Открыть настройки");
+    go.onclick = () => { haptic(); openTab("settings"); };
+    box.append(go);
+    $("view").replaceChildren(box);
+  } else if (state.tab === "list") {
+    renderList();
+  } else {
+    renderCalendar();
+  }
+
   syncTopbarHeight();
   window.scrollTo({ top: 0 });
 }
 
-function showLoading() {
+function loadingBox(text) {
   const box = el("div", "state");
-  box.append(el("div", "spinner"), el("div", null, "Загружаем расписание…"));
-  $("view").replaceChildren(box);
+  box.append(el("div", "spinner"), el("div", null, text));
+  return box;
+}
+
+function showLoading() {
+  $("view").replaceChildren(loadingBox("Загружаем расписание…"));
 }
 
 function showError(message) {
@@ -489,13 +705,11 @@ async function boot() {
 }
 
 /* Почему не загрузилось — человеческим языком. Сервер на запрос без подписи
-   отвечает одинаково, а причины разные: мост Telegram не загрузился (скрипт
-   с telegram.org в сети пользователя заблокирован или замедлен) или страницу
-   открыли в обычном браузере. */
+   отвечает одинаково, а причины разные: не поднялся мост Telegram или
+   страницу открыли в обычном браузере. */
 function explainFailure(err) {
   if (!window.Telegram) {
-    return "Не загрузился скрипт Telegram с telegram.org — в вашей сети он заблокирован "
-      + "или сильно замедлен. Закройте приложение и откройте снова.";
+    return "Не загрузился мост Telegram. Закройте приложение и откройте снова.";
   }
   if (!tg?.initData) {
     return "Приложение открыто вне Telegram. Откройте его кнопкой «Расписание» в боте.";
