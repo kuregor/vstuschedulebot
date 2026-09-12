@@ -1,7 +1,19 @@
+# Стек Mini App: база, бот вместе с приложением и туннель до публичного
+# HTTPS-адреса (без него Telegram не откроет Mini App).
+#
+# Какой туннель поднимать, выбирает COMPOSE_PROFILES в .env:
+#   cf  — Cloudflare Tunnel: постоянный адрес на своём домене. Адрес лежит в
+#         WEBAPP_URL, ingress — в cloudflared/config.yml, ключ — в secrets/cloudflared/
+#   lhr — localhost.run: ни домена, ни аккаунта. Адрес выдаётся при подключении,
+#         контейнер публикует его на общий том, бот читает оттуда
+# Дальше всё одной командой:  docker compose up -d --build
+#
+# Провайдер режет DNS-записи Cloudflare (cloudflared в логах не находит edge)?
+# К профилю cf добавляется DoH-резолвер из docker-compose.doh.yml — см. там.
 services:
   db:
     image: postgres:18
-    container_name: db
+    container_name: schedule-db
     restart: unless-stopped
     environment:
       POSTGRES_USER: schedule
@@ -11,7 +23,8 @@ services:
       LANG: C.UTF-8
     ports:
       # наружу для host-скриптов (scripts/parse_preview.py, psql с хоста).
-      # если 5433 занят — поменяйте на другой, внутри сети всё равно 5432
+      # 5433, потому что 5432 обычно занят локальным PostgreSQL; внутри сети
+      # compose база всё равно db:5432
       - "5433:5432"
     volumes:
       # в postgres 18+ монтируем каталог целиком, данные лягут в /var/lib/postgresql/18/docker
@@ -40,7 +53,7 @@ services:
       #  окажется доступен всем по публичному адресу)
       - "7070:7070"
     volumes:
-      # сюда туннель кладёт актуальный публичный адрес; бот только читает
+      # сюда туннель localhost.run кладёт актуальный адрес; бот только читает
       - tunnel-state:/state:ro
     depends_on:
       db:
@@ -52,24 +65,50 @@ services:
       retries: 5
       start_period: 15s
 
-  # Публичный HTTPS-адрес, без которого Telegram не откроет Mini App.
-  # localhost.run — SSH-реверс: ни аккаунта, ни установки, ни заглушек.
-  # (Cloudflare Tunnel в этой сети не поднимается: провайдер режет DNS
-  #  для зоны argotunnel.com, cloudflared не находит edge и падает в цикле.)
-  #
+  # Профиль lhr. localhost.run — SSH-реверс: ни аккаунта, ни установки.
   # Адрес меняется при каждом переподключении, поэтому scripts/tunnel.sh пишет
-  # его в общий том /state/url, а бот читает оттуда на каждое построение кнопки:
-  # править .env и пересоздавать контейнер после обрыва больше не нужно.
-  # Посмотреть текущий:  docker compose logs tunnel | findstr lhr.life
+  # его в общий том /state/url, а бот читает оттуда на каждое построение кнопки
+  # (пока WEBAPP_URL пуст). Посмотреть текущий:
+  #   docker compose logs tunnel | findstr lhr.life
   # Постоянный поддомен даёт регистрация ключа на https://admin.localhost.run/
   tunnel:
     image: alpine:latest
-    container_name: tunnel
+    container_name: schedule-tunnel
     restart: unless-stopped
-    command: sh /tunnel.sh
+    profiles: ["lhr"]
+    # tr -d '\r': скрипт приходит бинд-монтом с Windows, и после копирования
+    # папки или checkout с autocrlf в нём CRLF — sh спотыкается уже на set -u
+    command: ["sh", "-c", "tr -d '\\r' </tunnel.sh >/tmp/tunnel.sh && sh /tmp/tunnel.sh"]
     volumes:
       - ./scripts/tunnel.sh:/tunnel.sh:ro
+      # приватный ключ, зарегистрированный на admin.localhost.run: с ним
+      # поддомен постоянный. Файла нет — туннель поднимается анонимно
+      - ./secrets/lhr_ed25519:/key:ro
       - tunnel-state:/state
+    depends_on:
+      bot:
+        condition: service_healthy
+
+  # Профиль cf. Cloudflare Tunnel: постоянный адрес на своём домене без белого IP.
+  # cloudflared держит исходящее соединение до края Cloudflare, входящий 443 и
+  # сертификат остаются на стороне Cloudflare — поэтому nginx не нужен, а до
+  # bot:7070 идёт обычный http внутри сети compose.
+  #
+  # Нужны два файла: cloudflared/config.yml (id туннеля и ingress, в репозитории)
+  # и secrets/cloudflared/<id>.json (ключ туннеля, в .gitignore) — как их
+  # получить, см. README_BOT.md. Протокол http2, не QUIC: UDP/7844 провайдеры
+  # режут чаще, TCP/7844 до edge обычно открыт.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: schedule-cloudflared
+    restart: unless-stopped
+    profiles: ["cf"]
+    command: --no-autoupdate --config /etc/cloudflared/config.yml tunnel run
+    volumes:
+      # ingress-правила: в репозитории, секретов не содержат
+      - ./cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      # учётные данные туннеля: только чтение, каталог в .gitignore
+      - ./secrets/cloudflared:/home/nonroot/.cloudflared:ro
     depends_on:
       bot:
         condition: service_healthy
@@ -78,5 +117,5 @@ volumes:
   # имя тома не трогаю: в нём лежит уже загруженное расписание,
   # переименование создало бы пустой том
   vstu-pgdata:
-  # текущий публичный адрес приложения — общий между туннелем и ботом
+  # текущий адрес localhost.run — общий между туннелем и ботом
   tunnel-state:

@@ -1,0 +1,4 @@
+# tunnel.sh уходит бинд-монтом в alpine: CRLF там ломает shebang
+*.sh text eol=lf
+# .env читает и docker compose (COMPOSE_PROFILES): CR в значении ломает профиль
+.env* text eol=lf

@@ -1,0 +1,57 @@
+# Дополнение к docker-compose.yml для сетей, где провайдер режет DNS Cloudflare:
+# A-записи argotunnel.com приходят, а SRV _v2-origintunneld._tcp.argotunnel.com
+# пустой и через 1.1.1.1, и через 8.8.8.8 — cloudflared не находит edge и
+# падает в цикле. Через DNS-over-HTTPS те же SRV возвращаются нормально, поэтому
+# рядом поднимается DoH-резолвер, а cloudflared ходит за внешними именами в него.
+#
+# Нужен ли он в вашей сети:
+#   nslookup -type=SRV _v2-origintunneld._tcp.argotunnel.com
+# Если в ответе есть region1/region2.v2.argotunnel.com — не нужен.
+#
+# Подключается вместе с основным файлом через .env (разделитель в Windows «;»,
+# в Linux/macOS «:»):
+#   COMPOSE_FILE=docker-compose.yml;docker-compose.doh.yml
+# или разово:
+#   docker compose -f docker-compose.yml -f docker-compose.doh.yml up -d
+services:
+  dns-proxy:
+    # cloudflared здесь не годится: proxy-dns из него убрали в 2026.2.0
+    image: adguard/dnsproxy:latest
+    container_name: schedule-dns
+    restart: unless-stopped
+    profiles: ["cf"]
+    # порт 53: адрес резолвера Docker подставляет в resolv.conf без порта,
+    # поэтому слушать нужно именно стандартный
+    command: -l 0.0.0.0 -p 53 -u https://1.1.1.1/dns-query -u https://1.0.0.1/dns-query
+    volumes:
+      # корневые сертификаты для TLS до 1.1.1.1. Обычный бандл Mozilla:
+      #   curl -o secrets/ca-bundle.crt https://curl.se/ca/cacert.pem
+      # Если антивирус на машине перехватывает HTTPS (Kaspersky и подобные),
+      # проверка падает с «certificate signed by unknown authority» — тогда в
+      # конец файла дописывается его корневой сертификат в PEM. Файл
+      # машинно-зависимый, лежит в secrets/ и в репозиторий не идёт
+      - ./secrets/ca-bundle.crt:/etc/ssl/certs/ca-certificates.crt:ro
+    networks:
+      # фиксированный адрес: cloudflared указывает на резолвер по IP
+      dnsnet:
+        ipv4_address: 172.28.53.53
+
+  cloudflared:
+    # внешние запросы (включая SRV к argotunnel.com) встроенный резолвер
+    # Docker пересылает сюда — то есть в DoH, мимо провайдерского DNS.
+    # Имена сервисов (bot) при этом продолжает разрешать сам Docker
+    dns:
+      - 172.28.53.53
+    networks:
+      # default — чтобы достучаться до bot:7070, dnsnet — до резолвера
+      - default
+      - dnsnet
+    depends_on:
+      dns-proxy:
+        condition: service_started
+
+networks:
+  dnsnet:
+    ipam:
+      config:
+        - subnet: 172.28.53.0/24

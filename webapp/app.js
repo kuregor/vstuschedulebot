@@ -484,8 +484,23 @@ async function boot() {
   try {
     await loadSchedule();
   } catch (err) {
-    showError(String(err.message || err));
+    showError(explainFailure(err));
   }
+}
+
+/* Почему не загрузилось — человеческим языком. Сервер на запрос без подписи
+   отвечает одинаково, а причины разные: мост Telegram не загрузился (скрипт
+   с telegram.org в сети пользователя заблокирован или замедлен) или страницу
+   открыли в обычном браузере. */
+function explainFailure(err) {
+  if (!window.Telegram) {
+    return "Не загрузился скрипт Telegram с telegram.org — в вашей сети он заблокирован "
+      + "или сильно замедлен. Закройте приложение и откройте снова.";
+  }
+  if (!tg?.initData) {
+    return "Приложение открыто вне Telegram. Откройте его кнопкой «Расписание» в боте.";
+  }
+  return String(err.message || err);
 }
 
 boot();

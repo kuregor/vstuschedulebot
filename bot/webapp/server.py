@@ -110,8 +110,16 @@ async def handle_index(_: web.Request) -> web.FileResponse:
     return web.FileResponse(STATIC_DIR / "index.html")
 
 
+async def _no_cache(_: web.Request, response: web.StreamResponse) -> None:
+    """Статика и index без кэша: после пересборки образа встроенный браузер
+    Telegram иначе показывает прошлую версию приложения, пока не истечёт
+    эвристический срок. no-cache — это «перепроверь», ответ 304 дешёвый."""
+    response.headers.setdefault("Cache-Control", "no-cache")
+
+
 def create_app() -> web.Application:
     app = web.Application()
+    app.on_response_prepare.append(_no_cache)
     app.add_routes(
         [
             web.get("/", handle_index),
