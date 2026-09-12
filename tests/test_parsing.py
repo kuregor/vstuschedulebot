@@ -18,6 +18,7 @@ from bot.parsing.classify import (
     marked_as_lecture,
 )
 from bot.parsing.dates import (
+    dates_from_pairs,
     explicit_dates,
     lesson_dates,
     recurring_dates,
@@ -236,3 +237,42 @@ def test_group_name_is_tidied_for_display():
     assert tidy_group_name("ИВТ -160") == "ИВТ-160"
     assert tidy_group_name("Ф - 169") == "Ф-169"
     assert tidy_group_name("ПП-351  (мясо)") == "ПП-351 (мясо)"
+
+
+# ── даты из колонок с числами месяцев ────────────────────────────────────
+# Понедельники недели 2 из файла ФАСТиВ: занятия кончаются 14 декабря, а
+# расчёт по чётности дотягивает их до 28-го, когда пар уже нет.
+FILE_MONDAYS = [(9, 7), (9, 21), (10, 5), (10, 19), (11, 2), (11, 16), (11, 30), (12, 14)]
+
+
+def test_dates_from_pairs_keeps_only_semester():
+    # 31 августа раньше семестра, 30 февраля не существует
+    got = dates_from_pairs([(9, 14), (8, 31), (12, 21), (2, 30)], SEM_START, SEM_END)
+    assert got == [date(2026, 9, 14), date(2026, 12, 21)]
+
+
+def test_file_dates_win_over_parity():
+    got = lesson_dates("", 1, 2, SEM_START, SEM_END, FILE_MONDAYS)
+    assert got[0] == date(2026, 9, 7)
+    assert got[-1] == date(2026, 12, 14)
+    # расчёт по чётности дотянул бы до 28 декабря
+    assert date(2026, 12, 28) in recurring_dates(1, 2, SEM_START, SEM_END)
+    assert date(2026, 12, 28) not in got
+
+
+def test_parity_used_when_file_has_no_columns():
+    assert lesson_dates("", 1, 1, SEM_START, SEM_END, []) == recurring_dates(
+        1, 1, SEM_START, SEM_END
+    )
+
+
+def test_note_dates_win_over_file_columns():
+    # у пары свой перечень дат — он точнее, чем даты всего дня
+    got = lesson_dates("07.09, 05.10", 1, 2, SEM_START, SEM_END, FILE_MONDAYS)
+    assert got == [date(2026, 9, 7), date(2026, 10, 5)]
+
+
+def test_start_note_trims_file_dates():
+    got = lesson_dates("занятия с 19.10", 1, 2, SEM_START, SEM_END, FILE_MONDAYS)
+    assert got[0] == date(2026, 10, 19)
+    assert date(2026, 9, 7) not in got

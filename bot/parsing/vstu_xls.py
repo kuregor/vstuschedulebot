@@ -11,6 +11,9 @@
                    (6 пар × 3 строки). Дни идут ДВАЖДЫ: первые шесть —
                    НЕДЕЛЯ 1, следующие шесть — НЕДЕЛЯ 2 (числитель/знаменатель);
     колонка 5    — метки пар: "1- 2", "3- 4", "5- 6", "7- 8", "9-10", "11-12";
+    колонки слева от дней — числа месяцев: под "Сентябрь", "Октябрь" и так
+                   далее внутри блока дня перечислены даты, когда этот день
+                   с этой чётностью недели действительно идёт;
     колонки группы — сверху вниз: НАЗВАНИЕ ПРЕДМЕТА (объединённая ячейка),
                    при необходимости строка-заметка (конкретные даты,
                    "занятия с 16.09", "лаб.", "9-12ч"), затем строка
@@ -50,6 +53,12 @@ DAY_NAMES = [
     "СУББОТА",
 ]
 DAY_INDEX = {name: i + 1 for i, name in enumerate(DAY_NAMES)}
+
+# Заголовки колонок с датами занятий: под каждым в блоке дня стоят числа.
+MONTH_HEADERS = {
+    "январь": 1, "февраль": 2, "март": 3, "апрель": 4, "май": 5, "июнь": 6,
+    "июль": 7, "август": 8, "сентябрь": 9, "октябрь": 10, "ноябрь": 11, "декабрь": 12,
+}
 
 SLOT_LABELS = ["1-2", "3-4", "5-6", "7-8", "9-10", "11-12"]
 SLOT_TIMES = [
@@ -109,6 +118,9 @@ class ParsedLesson:
     room: str = ""
     lesson_type: str = TYPE_SEMINAR
     raw_note: str = ""
+    # Даты занятия (месяц, число) из колонок слева — то, что проставил
+    # учебный отдел. Пусто, если в файле этих колонок нет.
+    block_dates: list[tuple[int, int]] = field(default_factory=list)
     # предмет записан ячейкой, объединённой по колонкам нескольких групп
     shared_cell: bool = False
     # в блоке прямо написано «(лекция)»
@@ -209,6 +221,52 @@ def find_day_column(grid: MergedGrid, limit: int = 8) -> int:
     return best_col
 
 
+def find_month_columns(grid: MergedGrid, limit_col: int, max_row: int) -> dict[int, int]:
+    """{колонка: номер месяца} по заголовкам в левой части листа.
+
+    Порядок колонок у факультетов разный: у бакалавриата месяцы идут первыми,
+    а день недели за ними, у магистратуры наоборот. Поэтому ищем месяцы во
+    всём, что левее первой группы, а не на заранее известных местах.
+
+    Нужны хотя бы два месяца в строке: одиночное слово «Сентябрь» попадается
+    и в тексте шапки.
+    """
+    for r in range(0, min(max_row, grid.nrows)):
+        found = {
+            c: MONTH_HEADERS[grid.text(r, c).strip().lower()]
+            for c in range(0, min(limit_col, grid.ncols))
+            if grid.text(r, c).strip().lower() in MONTH_HEADERS
+        }
+        if len(found) >= 2:
+            return found
+    return {}
+
+
+def block_dates(
+    grid: MergedGrid, month_cols: dict[int, int], row0: int
+) -> list[tuple[int, int]]:
+    """Даты (месяц, число) одного блока дня из колонок с числами месяцев.
+
+    Числа разбросаны по строкам блока: в месяце таких дат две-три, а строк
+    восемнадцать. К какой паре число ближе, значения не имеет — это даты
+    всего дня целиком, поэтому собираем их по всему блоку.
+
+    Берём только ячейки, где стоит одно число: в некоторых файлах заголовки
+    месяцев повторяются внутри блока, а кое-где попадаются обрывки пометок
+    вроде «-3».
+    """
+    out: list[tuple[int, int]] = []
+    for col, month in sorted(month_cols.items()):
+        for row in range(row0, min(row0 + ROWS_PER_DAY, grid.nrows)):
+            text = grid.text(row, col).strip()
+            if not text.isdigit():
+                continue
+            day = int(text)
+            if 1 <= day <= 31 and (month, day) not in out:
+                out.append((month, day))
+    return sorted(out)
+
+
 def _find_day_blocks(grid: MergedGrid, day_col: int = 0) -> list[tuple[int, int, int]]:
     """-> [(week, weekday, row0), ...] в порядке появления в файле."""
     hits: list[tuple[int, int]] = []  # (row, weekday)
@@ -273,6 +331,7 @@ def _parse_group_day(
     weekday: int,
     row0: int,
     warnings: list[str],
+    day_dates: list[tuple[int, int]] | None = None,
 ) -> list[ParsedLesson]:
     """Линейный проход сверху вниз по колонкам одной группы внутри блока дня."""
     lessons: list[ParsedLesson] = []
@@ -307,6 +366,7 @@ def _parse_group_day(
                 teacher=current["teacher"],
                 room=current["room"],
                 raw_note=note,
+                block_dates=list(day_dates or ()),
                 shared_cell=current["shared"],
                 marked_lecture=marked_as_lecture(subject_raw, note),
             )
@@ -466,7 +526,8 @@ def parse_workbook(path: str, filename: str = "") -> ParsedSchedule:
     if m:
         result.faculty = m.group(1)
 
-    blocks = _find_day_blocks(grid, find_day_column(grid))
+    day_col = find_day_column(grid)
+    blocks = _find_day_blocks(grid, day_col)
     if not blocks:
         raise ValueError("Не найдены блоки дней недели — формат файла не распознан")
 
@@ -475,12 +536,25 @@ def parse_workbook(path: str, filename: str = "") -> ParsedSchedule:
         raise ValueError("Не найдена строка с названиями групп — формат файла не распознан")
     result.groups = [name for name, _ in group_cols]
 
+    month_cols = find_month_columns(
+        grid, limit_col=group_cols[0][1], max_row=blocks[0][2]
+    )
+    if not month_cols:
+        result.warnings.append(
+            "в файле нет колонок с числами месяцев — даты занятий рассчитаны "
+            "по чётности недели"
+        )
+    dates_of_block = {
+        row0: block_dates(grid, month_cols, row0) for _w, _d, row0 in blocks
+    }
+
     for idx, (name, gc0) in enumerate(group_cols):
         col_limit = group_cols[idx + 1][1] if idx + 1 < len(group_cols) else grid.ncols
         for week, weekday, row0 in blocks:
             result.lessons.extend(
                 _parse_group_day(
-                    grid, name, gc0, col_limit, week, weekday, row0, result.warnings
+                    grid, name, gc0, col_limit, week, weekday, row0,
+                    result.warnings, dates_of_block[row0],
                 )
             )
 

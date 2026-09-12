@@ -180,7 +180,9 @@ async def save_schedule(
             raw_note=item.raw_note,
         )
         session.add(lesson)
-        for day in lesson_dates(item.raw_note, item.weekday, item.week, sem_start, sem_end):
+        for day in lesson_dates(
+            item.raw_note, item.weekday, item.week, sem_start, sem_end, item.block_dates
+        ):
             lesson.dates.append(LessonDate(on_date=day))
             dates_count += 1
 

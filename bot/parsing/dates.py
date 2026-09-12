@@ -1,15 +1,21 @@
 """Разворачивание занятия в конкретные календарные даты семестра.
 
-Правила (те же, что были выработаны в дизайне):
+Правила, от самого надёжного источника к самому приблизительному:
 
-1. Если в заметке перечислены конкретные даты («29.09, 27.10, 24.11, 22.12») —
-   они и есть истина, берём их как есть.
-2. «занятия с 16.09» — обычный расчёт по чётности недели, но всё, что раньше
-   указанной даты, отбрасывается.
-3. Иначе занятие повторяется через неделю: НЕДЕЛЯ 1 — на неделях той же
-   чётности, что и первая неделя семестра, НЕДЕЛЯ 2 — на противоположных.
-   Предмет, идущий каждую неделю, в исходнике просто стоит в обоих блоках,
-   поэтому «еженедельно» получается само собой объединением двух записей.
+1. Если в заметке к паре перечислены конкретные даты («29.09, 27.10, 24.11,
+   22.12») — они и есть истина, берём их как есть.
+2. Даты дня из колонок с числами месяцев: учебный отдел проставил их сам, и
+   в них уже учтены и праздники, и конец занятий в декабре.
+3. «занятия с 16.09» — то же самое, но всё, что раньше указанной даты,
+   отбрасывается.
+4. Если ничего этого в файле нет, занятие повторяется через неделю: НЕДЕЛЯ 1 —
+   на неделях той же чётности, что и первая неделя семестра, НЕДЕЛЯ 2 — на
+   противоположных. Предмет, идущий каждую неделю, в исходнике просто стоит в
+   обоих блоках, поэтому «еженедельно» получается объединением двух записей.
+
+Расчёт по чётности (пункт 4) даёт лишние даты в конце декабря, когда занятия
+уже кончились, поэтому он остался только страховкой: из 516 блоков дней в
+расписаниях семестра он расходится с файлом в 147.
 """
 from __future__ import annotations
 
@@ -37,6 +43,21 @@ def explicit_dates(note: str, semester_start: date, semester_end: date) -> list[
         day, month = int(day_s), int(month_s)
         if not (1 <= month <= 12 and 1 <= day <= 31):
             continue
+        try:
+            d = date(_year_for_month(month, semester_start), month, day)
+        except ValueError:
+            continue
+        if semester_start <= d <= semester_end and d not in out:
+            out.append(d)
+    return sorted(out)
+
+
+def dates_from_pairs(
+    pairs: list[tuple[int, int]], semester_start: date, semester_end: date
+) -> list[date]:
+    """(месяц, число) из файла -> настоящие даты в границах семестра."""
+    out: list[date] = []
+    for month, day in pairs:
         try:
             d = date(_year_for_month(month, semester_start), month, day)
         except ValueError:
@@ -105,8 +126,18 @@ def lesson_dates(
     week: int,
     semester_start: date,
     semester_end: date,
+    block_dates: list[tuple[int, int]] | None = None,
 ) -> list[date]:
     note = note or ""
+    explicit = explicit_dates(note, semester_start, semester_end)
+    if explicit:
+        return explicit
+
+    # даты дня из файла, иначе — расчёт по чётности недели
+    base = dates_from_pairs(block_dates or [], semester_start, semester_end)
+    if not base:
+        base = recurring_dates(weekday, week, semester_start, semester_end)
+
     from_match = FROM_DATE_RE.search(note)
     if from_match:
         day, month = int(from_match.group(1)), int(from_match.group(2))
@@ -114,14 +145,6 @@ def lesson_dates(
             threshold = date(_year_for_month(month, semester_start), month, day)
         except ValueError:
             threshold = semester_start
-        return [
-            d
-            for d in recurring_dates(weekday, week, semester_start, semester_end)
-            if d >= threshold
-        ]
+        return [d for d in base if d >= threshold]
 
-    explicit = explicit_dates(note, semester_start, semester_end)
-    if explicit:
-        return explicit
-
-    return recurring_dates(weekday, week, semester_start, semester_end)
+    return base
