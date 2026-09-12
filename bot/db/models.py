@@ -64,8 +64,6 @@ class ScheduleSource(Base):
     lessons_count: Mapped[int] = mapped_column(Integer, default=0)
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    groups: Mapped[list["Group"]] = relationship(back_populates="source")
-
 
 class Group(Base):
     __tablename__ = "groups"
@@ -88,7 +86,6 @@ class Group(Base):
     lessons: Mapped[list["Lesson"]] = relationship(
         back_populates="group", cascade="all, delete-orphan"
     )
-    source: Mapped[ScheduleSource | None] = relationship(back_populates="groups")
 
     @property
     def level_title(self) -> str:

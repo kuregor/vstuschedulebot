@@ -98,7 +98,13 @@ def settings_json(
             }
         )
 
-    selected_source = selected_group.source if selected_group else None
+    # Источник ищем в уже прочитанном списке, а не через связь группы: у
+    # асинхронной сессии дозагрузка связи вне await запрещена, и такой обход
+    # держался бы лишь на том, что нужная строка случайно оказалась в сессии.
+    selected_source = next(
+        (s for s in sources if selected_group is not None and s.id == selected_group.source_id),
+        None,
+    )
     return {
         "levels": levels,
         "groups": [{"id": g.id, "name": g.name} for g in groups],

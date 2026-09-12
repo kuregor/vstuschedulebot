@@ -59,7 +59,7 @@ async def handle_settings(request: web.Request) -> web.Response:
 
 async def handle_pick_source(request: web.Request) -> web.Response:
     """Выбор файла расписания в настройках: включаем и сразу загружаем."""
-    _user_id(request)
+    _user_id(request)  # проверка подписи Telegram; сам выбор общий для всех
     body = await request.json()
     url = str(body.get("url", "")).strip()
     if not url:
