@@ -175,17 +175,49 @@ def _day_dates_label(week: int, weekday: int, start: date, end: date) -> str:
     return " · ".join(out) + f" {MONTH_SHORT[(month or start.month) - 1]}"
 
 
-def _week_range_label(week: int, start: date) -> str:
-    first_monday = start - timedelta(days=start.weekday())
-    monday = first_monday + timedelta(days=7 if week == 2 else 0)
-    left = max(monday, start)
-    right = monday + timedelta(days=5)
-    if left.month == right.month:
-        return f"{left.day:02d}–{right.day:02d} {MONTH_SHORT[left.month - 1]}"
-    return (
-        f"{left.day:02d} {MONTH_SHORT[left.month - 1]} – "
-        f"{right.day:02d} {MONTH_SHORT[right.month - 1]}"
+def week_occurrence(
+    week: int, start: date, end: date, today: date
+) -> tuple[date, date]:
+    """Ближайшее повторение недели -> (понедельник, суббота).
+
+    Неделя 1 и неделя 2 чередуются весь семестр, поэтому «01–05 сен» — это
+    лишь первая из восьми одинаковых недель, и к октябрю такая подпись
+    ничего не значит. Берём ту неделю, которая идёт сейчас, а если она уже
+    прошла — следующую такую же. После конца занятий остаётся последняя.
+    """
+    anchor = start - timedelta(days=start.weekday()) + timedelta(
+        days=7 if week == 2 else 0
     )
+    spans: list[tuple[date, date]] = []
+    step = 0
+    while True:
+        monday = anchor + timedelta(days=step * 14)
+        if monday > end:
+            break
+        saturday = monday + timedelta(days=5)
+        if saturday >= start:
+            spans.append((max(monday, start), min(saturday, end)))
+        step += 1
+    if not spans:
+        return start, end
+    for span in spans:
+        if today <= span[1]:
+            return span
+    return spans[-1]
+
+
+def _week_range_label(week: int, start: date, end: date, today: date) -> str:
+    left, right = week_occurrence(week, start, end, today)
+    if left.month == right.month:
+        label = f"{left.day:02d}–{right.day:02d} {MONTH_SHORT[left.month - 1]}"
+    else:
+        label = (
+            f"{left.day:02d} {MONTH_SHORT[left.month - 1]} – "
+            f"{right.day:02d} {MONTH_SHORT[right.month - 1]}"
+        )
+    if left <= today <= right:
+        label += " · сейчас"
+    return label
 
 
 def schedule_json(group: Group, lessons: list[Lesson], today: date | None = None) -> dict:
@@ -218,7 +250,7 @@ def schedule_json(group: Group, lessons: list[Lesson], today: date | None = None
             {
                 "id": week,
                 "label": f"НЕДЕЛЯ {week}",
-                "range": _week_range_label(week, start),
+                "range": _week_range_label(week, start, end, today),
                 "count": plural_pairs(total),
                 "days": days,
             }
