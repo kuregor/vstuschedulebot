@@ -34,12 +34,49 @@ const haptic = (style = "light") => tg?.HapticFeedback?.impactOccurred?.(style);
 
 /* ── данные ──────────────────────────────────────────────────────── */
 
+/* Запрос к боту с таймаутом и повторами.
+
+   Приложение живёт за быстрым туннелем, и тот иногда теряет соединение:
+   запрос уходит и не доходит никуда. Без таймаута fetch в этом случае висит
+   до последнего, и на экране вечно «Загружаем расписание…» — лечилось только
+   тем, что человек сам перезапускал мини-апп по нескольку раз.
+
+   Ответ 4xx повторять бессмысленно: это отказ по существу (не та подпись
+   Telegram, нет такого файла), а не потеря пакета. */
+const API_TIMEOUT_MS = 7000;
+const API_ATTEMPTS = 3;
+
 async function api(path, options = {}) {
-  const headers = Object.assign({ "Content-Type": "application/json" }, options.headers || {});
-  if (tg?.initData) headers["X-Telegram-Init-Data"] = tg.initData;
-  const resp = await fetch(path, Object.assign({}, options, { headers }));
-  if (!resp.ok) throw new Error(await resp.text() || resp.statusText);
-  return resp.json();
+  let lastError;
+  for (let attempt = 1; attempt <= API_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+    try {
+      const headers = Object.assign(
+        { "Content-Type": "application/json" }, options.headers || {});
+      if (tg?.initData) headers["X-Telegram-Init-Data"] = tg.initData;
+      const resp = await fetch(path,
+        Object.assign({}, options, { headers, signal: controller.signal }));
+      if (!resp.ok) {
+        const err = new Error(await resp.text() || resp.statusText);
+        err.final = resp.status >= 400 && resp.status < 500;
+        throw err;
+      }
+      return await resp.json();
+    } catch (err) {
+      lastError = err.name === "AbortError"
+        ? new Error("сервер не ответил вовремя")
+        : err;
+      if (err.final || attempt === API_ATTEMPTS) break;
+      // Экран ждёт молча почти двадцать секунд — говорим, что происходит,
+      // иначе повторы неотличимы от зависания.
+      document.dispatchEvent(new CustomEvent("api-retry", { detail: attempt + 1 }));
+      await new Promise((done) => setTimeout(done, 500 * attempt));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError;
 }
 
 async function loadSchedule(groupId) {
@@ -597,6 +634,8 @@ async function pickGroup(group) {
       body: JSON.stringify({ group_id: group.id }),
     });
     state.settings.selected.group_id = group.id;
+    // Группа выбрана — в настройках больше делать нечего, показываем расписание.
+    state.tab = "list";
     await loadSchedule(group.id);
   } catch (err) {
     showError(explainFailure(err));
@@ -624,7 +663,9 @@ function openTab(key) {
   // Каталог сайта читается при первом заходе в настройки, а не на старте:
   // тому, у кого группа уже выбрана, эти запросы ни к чему.
   if (key === "settings" && !state.settings) {
-    loadSettings().then(render).catch((err) => showError(explainFailure(err)));
+    loadSettings()
+      .then(render)
+      .catch((err) => showError(explainFailure(err), () => openTab("settings")));
   }
 }
 
@@ -657,7 +698,7 @@ function render() {
 
 function loadingBox(text) {
   const box = el("div", "state");
-  box.append(el("div", "spinner"), el("div", null, text));
+  box.append(el("div", "spinner"), el("div", null, text), el("div", "retry-note"));
   return box;
 }
 
@@ -665,9 +706,14 @@ function showLoading() {
   $("view").replaceChildren(loadingBox("Загружаем расписание…"));
 }
 
-function showError(message) {
+function showError(message, retry) {
   const box = el("div", "state");
   box.append(el("b", null, "Не удалось загрузить"), el("div", null, message));
+  if (retry) {
+    const again = el("button", "close-btn", "Повторить");
+    again.onclick = () => { haptic(); retry(); };
+    box.append(again);
+  }
   $("view").replaceChildren(box);
 }
 
@@ -688,6 +734,20 @@ function shortDate(value) {
   return `${d}.${m}`;
 }
 
+/* Высота видимой части окна по данным самого Telegram.
+
+   100vh внутри мини-аппа больше того, что реально видно: сверху ещё шапка
+   клиента, и на короткой странице нижняя панель оказывалась за краем экрана.
+   viewportStableHeight — высота без учёта клавиатуры и анимаций, то есть
+   именно та, под которую надо верстать. Значение приходит заново на каждое
+   изменение окна: разворот мини-аппа, поворот телефона. */
+function syncViewportHeight() {
+  const height = tg?.viewportStableHeight;
+  const app = document.querySelector(".app");
+  if (!app || !height) return;
+  app.style.minHeight = `${height}px`;
+}
+
 async function boot() {
   if (tg) {
     tg.ready();
@@ -695,12 +755,27 @@ async function boot() {
     tg.setHeaderColor?.("#f6f4f0");
     tg.setBackgroundColor?.("#f6f4f0");
     tg.BackButton?.onClick?.(() => { if (state.sheet) closeSheet(); else tg.close(); });
+    tg.onEvent?.("viewportChanged", syncViewportHeight);
+    syncViewportHeight();
   }
+  await loadInitial();
+}
+
+/* Пока идут повторные попытки, пишем об этом прямо в окно загрузки. */
+document.addEventListener("api-retry", (event) => {
+  const note = document.querySelector(".state .retry-note");
+  if (note) {
+    note.textContent =
+      `Связь неустойчивая, попытка ${event.detail} из ${API_ATTEMPTS}…`;
+  }
+});
+
+async function loadInitial() {
   showLoading();
   try {
     await loadSchedule();
   } catch (err) {
-    showError(explainFailure(err));
+    showError(explainFailure(err), loadInitial);
   }
 }
 
@@ -713,6 +788,13 @@ function explainFailure(err) {
   }
   if (!tg?.initData) {
     return "Приложение открыто вне Telegram. Откройте его кнопкой «Расписание» в боте.";
+  }
+  if (String(err.message).includes("не ответил вовремя")) {
+    // Адрес быстрого туннеля меняется при каждом переподключении, и уже
+    // открытое окно остаётся на прошлом поддомене: оттуда запросы никуда
+    // не приходят. Кнопка в боте к этому времени уже ведёт на новый адрес.
+    return "Сервер не отвечает. Скорее всего сменился адрес приложения — "
+      + "закройте окно и откройте расписание заново кнопкой в боте.";
   }
   return String(err.message || err);
 }

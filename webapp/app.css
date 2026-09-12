@@ -29,9 +29,27 @@ html, body {
   overscroll-behavior-y: none;
 }
 
-body::-webkit-scrollbar, .body::-webkit-scrollbar { width: 0; height: 0; }
+/* Полосу прокрутки прячем и у самого документа: страницу прокручивает html,
+   а не body. На Windows такая полоса занимает место в разметке, и при
+   переходе на короткую вкладку («Настройки») она пропадала — страница
+   становилась шире на полтора десятка пикселей, и вся вёрстка, включая
+   нижнюю панель, сдвигалась вбок. scrollbar-gutter держит ширину ровной
+   даже там, где полосу спрятать не удалось. */
+html { scrollbar-width: none; scrollbar-gutter: stable; }
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+.body::-webkit-scrollbar { width: 0; height: 0; }
 
+/* Высота экрана. В Telegram видимая область меньше, чем 100vh: под ним
+   ещё собственная шапка клиента. На длинной странице липкая нижняя панель
+   прижимается к видимому низу и это незаметно, а на короткой (настройки)
+   она встаёт по нижнему краю .app — то есть ниже экрана, и кажется, что
+   панель прыгнула. Поэтому берём динамическую высоту, а в самом Telegram —
+   его же viewportStableHeight, который приложение проставляет в style. */
 .app { min-height: 100vh; display: flex; flex-direction: column; }
+@supports (min-height: 100dvh) {
+  .app { min-height: 100dvh; }
+}
 
 /* ── шапка ───────────────────────────────────────────────────────── */
 
@@ -184,8 +202,12 @@ body::-webkit-scrollbar, .body::-webkit-scrollbar { width: 0; height: 0; }
 
 /* ── нижняя навигация ────────────────────────────────────────────── */
 
+/* Панель прибита к низу окна, а не к концу страницы. Липкой её ставить
+   нельзя: на длинной странице она прижимается к низу экрана, а на короткой
+   (настройки) — к нижнему краю .app, и при переходе между вкладками панель
+   заметно прыгает. Контент снизу отбит на её высоту. */
 .tabbar {
-  position: sticky; bottom: 0; z-index: 30; display: flex;
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: flex;
   background: rgba(246, 244, 240, 0.94);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
   border-top: 1px solid rgba(23, 22, 26, 0.08);
@@ -298,6 +320,7 @@ body::-webkit-scrollbar, .body::-webkit-scrollbar { width: 0; height: 0; }
 /* состояния загрузки и ошибки */
 .state { padding: 60px 24px; text-align: center; color: rgba(23, 22, 26, 0.6); font-size: 13px; font-weight: 600; }
 .state b { display: block; font-size: 15px; color: var(--ink); margin-bottom: 6px; }
+.state .retry-note { margin-top: 10px; font-size: 11.5px; font-weight: 500; color: rgba(23, 22, 26, 0.5); }
 .spinner {
   width: 22px; height: 22px; margin: 0 auto 14px; border-radius: 50%;
   border: 2px solid rgba(23, 22, 26, 0.15); border-top-color: var(--accent);
