@@ -71,13 +71,14 @@ function renderTopbar() {
   let sub = "Группа не выбрана";
   if (state.tab === "settings") {
     title = "Настройки";
-    sub = "Учебная группа";
+    sub = "";
   } else if (loaded) {
     title = data.group.name.replace("-", " ");
     sub = [data.group.level_title, data.group.course ? `${data.group.course} курс` : "",
       data.group.faculty, data.semester.title].filter(Boolean).join(" · ");
   }
-  titles.append(el("div", "screen-title", title), el("div", "subtitle", sub));
+  titles.append(el("div", "screen-title", title));
+  if (sub) titles.append(el("div", "subtitle", sub));
   row.append(titles);
 
   if (loaded) {
@@ -485,20 +486,19 @@ function renderSettings() {
   const selectedGroup = settings.groups.find((g) => g.id === settings.selected.group_id);
 
   const rows = el("div", "set-card set-rows");
-  rows.append(settingsRow("Факультет", faculty ? faculty.short : "", faculty?.title,
+  // Подписи есть только у курса: там видно, загружен ли файл и когда обновлялся.
+  // Полное название факультета и число групп повторяют то, что и так на виду.
+  rows.append(settingsRow("Факультет", faculty ? faculty.short : "", "",
     () => openPicker("faculty")));
   rows.append(settingsRow("Курс", file ? file.title : "", statusLine(file),
     () => openPicker("course")));
-  rows.append(settingsRow("Группа", selectedGroup ? selectedGroup.name : "",
-    settings.groups.length ? `${settings.groups.length} групп в файле` : "сначала выберите курс",
+  rows.append(settingsRow("Группа", selectedGroup ? selectedGroup.name : "", "",
     () => openPicker("group")));
   wrap.append(rows);
 
   const note = el("div", "set-note");
-  note.append(el("div", null,
-    "Расписание берётся с сайта ВолгГТУ и обновляется само: бот несколько раз "
-    + "в сутки сверяет все файлы с сайтом и перекачивает изменившиеся."));
-  const link = el("a", null, "открыть раздел расписаний на сайте");
+  note.append(el("div", null, "Расписание с сайта ВолгГТУ, обновляется само."));
+  const link = el("a", null, "раздел расписаний на сайте");
   link.href = SOURCE_URL;
   link.target = "_blank";
   link.rel = "noopener";
