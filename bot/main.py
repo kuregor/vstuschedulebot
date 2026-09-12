@@ -105,18 +105,21 @@ async def _keep_menu_button(bot: Bot) -> None:
 
 
 async def _keep_schedules_fresh() -> None:
-    """Перекачивает выбранные в настройках расписания.
+    """Держит в базе все расписания каталога.
 
-    Учебный отдел правит файлы прямо на сайте, не меняя адресов, поэтому
-    свежесть даёт только повторная загрузка. Берём лишь то, что кто-то выбрал
-    в настройках: качать весь каталог университета незачем.
+    При старте докачивается всё, чего ещё нет, — после этого в настройках
+    группы любого факультета видны сразу, без ожидания. Дальше раз в
+    SCHEDULE_REFRESH_HOURS сверяемся с сайтом условными запросами: учебный
+    отдел правит файлы по тем же адресам, и пока файл не менялся, проверка
+    стоит один ответ 304 без тела. Новые группы из обновлённого файла
+    добавляются в таблицу groups, старые не удаляются.
     """
     max_age = timedelta(hours=settings.refresh_hours)
     while True:
         try:
             async with SessionLocal() as session:
                 await source_service.sync_catalog(session, force=True)
-            await source_service.refresh_enabled(max_age)
+            await source_service.refresh_all(max_age)
         except Exception:  # сеть или сайт недоступны — попробуем на следующем круге
             log.exception("Обновление расписаний не удалось")
         await asyncio.sleep(settings.refresh_hours * 3600)

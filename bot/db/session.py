@@ -17,6 +17,8 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 LATE_COLUMNS = [
     "ALTER TABLE groups ADD COLUMN IF NOT EXISTS source_id INTEGER "
     "REFERENCES schedule_sources(id) ON DELETE SET NULL",
+    "ALTER TABLE schedule_sources ADD COLUMN IF NOT EXISTS etag VARCHAR(128) DEFAULT ''",
+    "ALTER TABLE schedule_sources ADD COLUMN IF NOT EXISTS last_modified VARCHAR(64) DEFAULT ''",
 ]
 
 

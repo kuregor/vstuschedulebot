@@ -46,17 +46,21 @@ def _updated_label(moment: datetime | None) -> str:
 
 
 def source_json(source: ScheduleSource) -> dict:
+    """Строка каталога для экрана настроек — только то, что он показывает.
+
+    Текст предупреждений разбора отдаётся лишь при ошибке: у 45 файлов он
+    весил больше ста килобайт на каждое открытие настроек, а на экране из
+    него видна только причина, по которой файл не загрузился.
+    """
     return {
         "url": source.url,
-        "dep": source.dep,
         "level": source.program_level.value,
         "faculty": source.faculty,
         "course": source.course,
         "title": source.title,
-        "file_name": source.file_name,
         "enabled": source.enabled,
         "status": source.status,
-        "message": source.message or "",
+        "message": (source.message or "") if source.status == "error" else "",
         "groups": source.groups_count,
         "lessons": source.lessons_count,
         "updated": _updated_label(source.fetched_at),

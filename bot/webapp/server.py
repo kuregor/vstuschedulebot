@@ -1,6 +1,7 @@
 """Веб-сервер Mini App: статика + JSON API. Работает в одном процессе с ботом."""
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 
@@ -16,6 +17,10 @@ from .auth import InitDataError, user_id_from_init_data
 
 log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parents[2] / "webapp"
+# Файлы, от которых зависит версия приложения в адресах статики.
+VERSIONED_ASSETS = ("app.js", "app.css", "telegram-web-app.js")
+# Год: адрес со старой версией никто больше не запросит, index на него не ссылается.
+IMMUTABLE_MAX_AGE = 365 * 24 * 3600
 
 
 def _init_data(request: web.Request) -> str:
@@ -41,10 +46,17 @@ def _user_id(request: web.Request) -> int | None:
 
 
 async def handle_settings(request: web.Request) -> web.Response:
-    """Экран настроек: каталог сайта, состояние загрузок и текущий выбор."""
+    """Экран настроек: каталог сайта, состояние загрузок и текущий выбор.
+
+    Каталог не сверяется с сайтом на каждый запрос — этим занимается фоновая
+    задача. Только на пустой базе (первый запуск) читаем его сразу, иначе
+    первый открывший настройки увидел бы пустой экран.
+    """
     user_id = _user_id(request)
     async with SessionLocal() as session:
-        sources = await sources_svc.sync_catalog(session)
+        sources = await sources_svc.list_sources(session)
+        if not sources:
+            sources = await sources_svc.sync_catalog(session)
         selected = None
         if user_id is not None:
             user = await svc.get_user(session, user_id)
@@ -58,7 +70,11 @@ async def handle_settings(request: web.Request) -> web.Response:
 
 
 async def handle_pick_source(request: web.Request) -> web.Response:
-    """Выбор файла расписания в настройках: включаем и сразу загружаем."""
+    """Выбор файла расписания в настройках.
+
+    Обычно файл уже загружен фоновой задачей, и ответ — просто список его
+    групп. Если нет (первые минуты после запуска на пустой базе), качаем сейчас.
+    """
     _user_id(request)  # проверка подписи Telegram; сам выбор общий для всех
     body = await request.json()
     url = str(body.get("url", "")).strip()
@@ -66,14 +82,9 @@ async def handle_pick_source(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest(text="Не указан файл расписания")
 
     async with SessionLocal() as session:
-        source = await sources_svc.get_source(session, url)
-        if source is None:
-            raise web.HTTPNotFound(text="Такого расписания нет в каталоге сайта")
         source = await sources_svc.set_enabled(session, url, True)
         if source is None:
             raise web.HTTPNotFound(text="Такого расписания нет в каталоге сайта")
-        if bool(body.get("reload")) and source.status == sources_svc.STATUS_OK:
-            source = await sources_svc.load_source(session, source)
         groups = await sources_svc.groups_of_source(session, source.id)
         return web.json_response(
             {
@@ -129,20 +140,60 @@ async def handle_health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-async def handle_index(_: web.Request) -> web.FileResponse:
-    return web.FileResponse(STATIC_DIR / "index.html")
+def asset_version() -> str:
+    """Версия статики — от самих файлов приложения.
+
+    Встроенный браузер Telegram (особенно на iPhone) берёт app.js и app.css из
+    кэша, не спрашивая сервер, даже при Cache-Control: no-cache. Единственное,
+    что он перечитывает, — сама страница. Поэтому адреса статики несут версию:
+    изменился файл — изменился адрес, и старая копия в кэше просто не нужна.
+    """
+    digest = hashlib.sha1()
+    for name in VERSIONED_ASSETS:
+        try:
+            stat = (STATIC_DIR / name).stat()
+        except FileNotFoundError:
+            continue
+        digest.update(f"{name}:{stat.st_mtime_ns}:{stat.st_size};".encode())
+    return digest.hexdigest()[:10]
 
 
-async def _no_cache(_: web.Request, response: web.StreamResponse) -> None:
-    """Статика и index без кэша: после пересборки образа встроенный браузер
-    Telegram иначе показывает прошлую версию приложения, пока не истечёт
-    эвристический срок. no-cache — это «перепроверь», ответ 304 дешёвый."""
-    response.headers.setdefault("Cache-Control", "no-cache")
+async def handle_index(_: web.Request) -> web.Response:
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    return web.Response(
+        text=html.replace("{{v}}", asset_version()),
+        content_type="text/html",
+        charset="utf-8",
+    )
+
+
+@web.middleware
+async def delivery_middleware(request: web.Request, handler):
+    """Кэш и сжатие.
+
+    * Страница и API — no-cache: перепроверяются каждый раз, а 304 дешёвый.
+    * Статика с версией в адресе — immutable на год: повторное открытие не
+      качает ни мост Telegram, ни скрипты приложения. Для узкого канала это
+      главное: 116 КБ моста через такой прокси приходят кусками и не всегда.
+    * JSON и страница сжимаются на лету. Статика сжата заранее: рядом с файлом
+      лежит его .gz, и aiohttp отдаёт его сам, если клиент понимает gzip.
+    """
+    response = await handler(request)
+    versioned_static = request.path.startswith("/static/") and "v" in request.query
+    if versioned_static:
+        response.headers["Cache-Control"] = f"public, max-age={IMMUTABLE_MAX_AGE}, immutable"
+    else:
+        response.headers.setdefault("Cache-Control", "no-cache")
+    if isinstance(response, web.Response) and response.content_type in (
+        "application/json",
+        "text/html",
+    ):
+        response.enable_compression()
+    return response
 
 
 def create_app() -> web.Application:
-    app = web.Application()
-    app.on_response_prepare.append(_no_cache)
+    app = web.Application(middlewares=[delivery_middleware])
     app.add_routes(
         [
             web.get("/", handle_index),
@@ -163,9 +214,10 @@ async def start_webapp() -> web.AppRunner:
     site = web.TCPSite(runner, settings.webapp_host, settings.webapp_port)
     await site.start()
     log.info(
-        "Mini App слушает http://%s:%s (публичный адрес: %s)",
+        "Mini App слушает http://%s:%s (публичный адрес: %s), версия статики %s",
         settings.webapp_host,
         settings.webapp_port,
         public_url.current() or "не задан — кнопка в боте не появится",
+        asset_version(),
     )
     return runner

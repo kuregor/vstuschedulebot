@@ -1,9 +1,13 @@
 """Источники расписания: каталог сайта в БД, загрузка и автообновление.
 
-Пользователь выбирает в настройках уровень, факультет и курс — это и есть
-конкретный файл на сайте. Выбранный файл помечается `enabled`, сразу
-скачивается и дальше обновляется сам: учебный отдел перевыкладывает файлы по
-тем же адресам, поэтому достаточно периодически перекачивать включённые.
+В базе живёт весь каталог сайта: при старте бот докачивает все файлы, которых
+ещё нет, а дальше по расписанию сверяется с сайтом условными запросами.
+Названия групп из каждого файла оседают в таблице groups и остаются там:
+новые группы из обновлённого файла добавляются, старые не удаляются.
+Поэтому в настройках группы любого факультета видны сразу, без ожидания.
+
+`enabled` отмечает файлы, которые кто-то выбирал в настройках, — это
+статистика использования, на загрузку она не влияет.
 """
 from __future__ import annotations
 
@@ -32,7 +36,7 @@ LEVEL_BY_SITE = {
 }
 
 # Одновременно тянем несколько файлов, но не весь каталог разом: сайт
-# университета отвечает неспешно, а книги по сотне-другой килобайт.
+# университета отвечает неспешно, а разбор книги занимает поток.
 REFRESH_CONCURRENCY = 3
 
 # Один и тот же файл не должен качаться дважды одновременно: настройки может
@@ -95,25 +99,35 @@ async def get_source(session: AsyncSession, url: str) -> ScheduleSource | None:
 
 
 async def groups_of_source(session: AsyncSession, source_id: int) -> list[Group]:
-    stmt = (
-        select(Group).where(Group.source_id == source_id).order_by(Group.name)
-    )
+    stmt = select(Group).where(Group.source_id == source_id).order_by(Group.name)
     return list(await session.scalars(stmt))
 
 
 async def load_source(session: AsyncSession, source: ScheduleSource) -> ScheduleSource:
-    """Скачивает и разбирает файл источника, обновляя его состояние в БД."""
+    """Сверяет файл источника с сайтом и при изменении перезаливает его.
+
+    Валидаторы прошлого ответа (ETag, Last-Modified) отправляются вместе с
+    запросом: если сайт ответил 304, разбирать нечего — только отмечаем
+    время проверки.
+    """
     url = source.url
     async with _lock_for(url):
         # Пока ждали замок, файл мог загрузить кто-то другой — перечитываем.
         source = await get_source(session, url) or source
+        etag, last_modified = source.etag or "", source.last_modified or ""
+        # Битый прошлый разбор перепроверяем без валидаторов: иначе сайт
+        # ответит 304, и ошибка застрянет до следующей правки файла.
+        if source.status != STATUS_OK:
+            etag = last_modified = ""
         source.status = STATUS_LOADING
         await session.commit()
 
         try:
-            result = await import_from_url(
+            result, download = await import_from_url(
                 session,
                 url,
+                etag,
+                last_modified,
                 level=source.program_level,
                 faculty=source.faculty,
                 course=source.course,
@@ -129,10 +143,17 @@ async def load_source(session: AsyncSession, source: ScheduleSource) -> Schedule
 
         source = await get_source(session, url) or source
         source.status = STATUS_OK
-        source.message = "; ".join(result.warnings[:5])
-        source.groups_count = len(result.groups)
-        source.lessons_count = result.lessons_count
+        source.etag = download.etag
+        source.last_modified = download.last_modified
         source.fetched_at = _now()
+        if result is not None:
+            source.message = "; ".join(result.warnings[:5])
+            source.groups_count = len(result.groups)
+            source.lessons_count = result.lessons_count
+            log.info(
+                "Расписание %s: %s групп, %s занятий",
+                source.file_name, len(result.groups), result.lessons_count,
+            )
         await session.commit()
         return source
 
@@ -140,7 +161,7 @@ async def load_source(session: AsyncSession, source: ScheduleSource) -> Schedule
 async def set_enabled(
     session: AsyncSession, url: str, enabled: bool
 ) -> ScheduleSource | None:
-    """Включает или выключает источник; включённый сразу загружается."""
+    """Отмечает выбор источника; не загруженный ещё файл качается сразу."""
     source = await get_source(session, url)
     if source is None:
         return None
@@ -160,31 +181,34 @@ def is_stale(source: ScheduleSource, max_age: timedelta) -> bool:
     return _now() - fetched > max_age
 
 
-async def refresh_enabled(max_age: timedelta) -> int:
-    """Перекачивает включённые источники, которые давно не обновлялись.
+async def refresh_all(max_age: timedelta) -> int:
+    """Сверяет с сайтом все источники, которые давно не проверялись.
 
+    Никогда не загружавшиеся качаются целиком, остальные — условным запросом.
     Каждый файл берёт свою сессию БД: загрузка идёт параллельно, а одна
     сессия SQLAlchemy для одновременной работы не предназначена.
     """
     async with SessionLocal() as session:
-        sources = [
-            row
-            for row in await list_sources(session)
-            if row.enabled and is_stale(row, max_age)
+        urls = [
+            row.url for row in await list_sources(session) if is_stale(row, max_age)
         ]
-        urls = [row.url for row in sources]
-
     if not urls:
         return 0
 
     semaphore = asyncio.Semaphore(REFRESH_CONCURRENCY)
+    changed = 0
 
     async def one(url: str) -> None:
+        nonlocal changed
         async with semaphore, SessionLocal() as session:
             source = await get_source(session, url)
-            if source is not None:
-                await load_source(session, source)
+            if source is None:
+                return
+            before = (source.etag, source.last_modified, source.status)
+            source = await load_source(session, source)
+            if (source.etag, source.last_modified, source.status) != before:
+                changed += 1
 
     await asyncio.gather(*(one(url) for url in urls))
-    log.info("Обновлено расписаний: %s", len(urls))
+    log.info("Проверено расписаний: %s, обновлено: %s", len(urls), changed)
     return len(urls)

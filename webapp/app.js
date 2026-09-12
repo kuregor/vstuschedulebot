@@ -496,8 +496,8 @@ function renderSettings() {
 
   const note = el("div", "set-note");
   note.append(el("div", null,
-    "Расписание берётся с сайта ВолгГТУ и обновляется само — выбранный файл "
-    + "бот перекачивает несколько раз в сутки."));
+    "Расписание берётся с сайта ВолгГТУ и обновляется само: бот несколько раз "
+    + "в сутки сверяет все файлы с сайтом и перекачивает изменившиеся."));
   const link = el("a", null, "открыть раздел расписаний на сайте");
   link.href = SOURCE_URL;
   link.target = "_blank";
@@ -565,7 +565,7 @@ function openPicker(kind) {
 
 async function pickFile(file) {
   state.busy = true;
-  $("view").replaceChildren(loadingBox("Скачиваем расписание с сайта ВолгГТУ…"));
+  $("view").replaceChildren(loadingBox("Открываем файл расписания…"));
   try {
     const resp = await api("/api/source", {
       method: "POST",

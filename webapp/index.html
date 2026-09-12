@@ -9,7 +9,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <!-- media="print" + onload: шрифты Google не блокируют отрисовку; пока грузятся, работает системный шрифт -->
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/app.css?v={{v}}">
 </head>
 <body>
   <div class="app">
@@ -21,12 +21,14 @@
     <nav class="tabbar" id="tabbar"></nav>
   </div>
   <div class="sheet-root" id="sheet-root" hidden></div>
+  <!-- {{v}} в адресах статики сервер заменяет версией файлов: встроенный браузер
+       Telegram иначе берёт старые app.js и app.css из кэша, не спрашивая сервер -->
   <!-- Мост Telegram (window.Telegram.WebApp) — локальная копия официального скрипта:
        telegram.org в России замедляют, и из встроенного браузера он грузился десятки секунд
        или не грузился вовсе. Обновление копии: curl -o webapp/telegram-web-app.js
        https://telegram.org/js/telegram-web-app.js. В конце страницы, а не в head, чтобы
        «Загружаем…» показывалось сразу -->
-  <script src="/static/telegram-web-app.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/telegram-web-app.js?v={{v}}"></script>
+  <script src="/static/app.js?v={{v}}"></script>
 </body>
 </html>

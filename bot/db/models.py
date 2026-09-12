@@ -63,6 +63,10 @@ class ScheduleSource(Base):
     groups_count: Mapped[int] = mapped_column(Integer, default=0)
     lessons_count: Mapped[int] = mapped_column(Integer, default=0)
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # ETag и Last-Modified прошлого ответа сайта: с ними повторная проверка
+    # файла стоит один запрос без тела (304), а не скачивание заново.
+    etag: Mapped[str] = mapped_column(String(128), default="")
+    last_modified: Mapped[str] = mapped_column(String(64), default="")
 
 
 class Group(Base):

@@ -46,13 +46,47 @@ def normalize_url(url: str) -> str:
     return parts._replace(path=quote(unquote(parts.path), safe="/")).geturl()
 
 
-async def download_xls(url: str) -> tuple[str, str]:
-    """Скачивает файл во временный каталог -> (путь, исходное имя файла)."""
+@dataclass
+class Download:
+    """Результат обращения к файлу на сайте.
+
+    path — None, когда сайт ответил 304: файл с прошлого раза не менялся,
+    качать и разбирать нечего. etag и last_modified — валидаторы для
+    следующей проверки.
+    """
+
+    path: str | None
+    filename: str
+    etag: str = ""
+    last_modified: str = ""
+
+    @property
+    def unchanged(self) -> bool:
+        return self.path is None
+
+
+async def download_xls(url: str, etag: str = "", last_modified: str = "") -> Download:
+    """Скачивает файл во временный каталог, если он изменился с прошлого раза.
+
+    Сайт университета поддерживает условные запросы: с If-None-Match или
+    If-Modified-Since он отвечает 304 без тела. Так плановое обновление
+    45 файлов стоит 45 пустых ответов, пока учебный отдел ничего не правил.
+    """
     url = normalize_url(url)
     filename = unquote(os.path.basename(urlparse(url).path)) or "schedule.xls"
+    headers = {}
+    if etag:
+        headers["If-None-Match"] = etag
+    if last_modified:
+        headers["If-Modified-Since"] = last_modified
+
     async with aiohttp.ClientSession(timeout=DOWNLOAD_TIMEOUT) as session:
-        async with session.get(url) as resp:
+        async with session.get(url, headers=headers) as resp:
+            if resp.status == 304:
+                return Download(None, filename, etag, last_modified)
             resp.raise_for_status()
+            new_etag = resp.headers.get("ETag", "")
+            new_modified = resp.headers.get("Last-Modified", "")
             # Читаем кусками до конца ответа. Не `content.read(n)`: он отдаёт
             # столько, сколько уже пришло, и книга приезжала обрезанной по
             # первому буферу — примерно 16 КБ вместо сотни.
@@ -73,7 +107,7 @@ async def download_xls(url: str) -> tuple[str, str]:
     fd, path = tempfile.mkstemp(suffix=suffix)
     with os.fdopen(fd, "wb") as fh:
         fh.write(data)
-    return path, filename
+    return Download(path, filename, new_etag, new_modified)
 
 
 async def save_schedule(
@@ -185,10 +219,20 @@ async def parse_in_thread(path: str, filename: str) -> ParsedSchedule:
     return await asyncio.to_thread(parse_workbook, path, filename)
 
 
-async def import_from_url(session: AsyncSession, url: str, **overrides) -> ImportResult:
-    path, filename = await download_xls(url)
+async def import_from_url(
+    session: AsyncSession,
+    url: str,
+    etag: str = "",
+    last_modified: str = "",
+    **overrides,
+) -> tuple[ImportResult | None, Download]:
+    """-> (результат, сведения о скачивании). Результат None — файл не менялся."""
+    download = await download_xls(url, etag, last_modified)
+    if download.unchanged:
+        return None, download
+    assert download.path is not None
     try:
-        parsed = await parse_in_thread(path, filename)
-        return await save_schedule(session, parsed, source=url, **overrides)
+        parsed = await parse_in_thread(download.path, download.filename)
+        return await save_schedule(session, parsed, source=url, **overrides), download
     finally:
-        os.unlink(path)
+        os.unlink(download.path)
