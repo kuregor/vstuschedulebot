@@ -8,3 +8,6 @@ venv/
 tools/
 secrets/
 *.gz
+
+# граф знаний по проекту (graphify) — пересобирается из исходников
+graphify-out/
