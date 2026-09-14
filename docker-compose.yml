@@ -1,15 +1,14 @@
 # Стек Mini App: база, бот вместе с приложением и туннель до публичного
 # HTTPS-адреса (без него Telegram не откроет Mini App).
 #
-# Какой туннель поднимать, выбирает COMPOSE_PROFILES в .env:
-#   cf  — Cloudflare Tunnel: постоянный адрес на своём домене. Адрес лежит в
-#         WEBAPP_URL, ingress — в cloudflared/config.yml, ключ — в secrets/cloudflared/
-#   lhr — localhost.run: ни домена, ни аккаунта. Адрес выдаётся при подключении,
-#         контейнер публикует его на общий том, бот читает оттуда
-# Дальше всё одной командой:  docker compose up -d --build
+# Туннель — localhost.run (профиль lhr в COMPOSE_PROFILES): ни домена, ни
+# аккаунта. Адрес выдаётся при подключении, контейнер публикует его на общий
+# том, бот читает оттуда и сам переставляет кнопку меню.
+# Всё одной командой:  docker compose up -d --build
 #
-# Провайдер режет DNS-записи Cloudflare (cloudflared в логах не находит edge)?
-# К профилю cf добавляется DoH-резолвер из docker-compose.doh.yml — см. там.
+# Cloudflare Tunnel отсюда не работает: провайдер обрывает рукопожатие с краем
+# Cloudflare по имени в TLS. Проверялось и curl'ом, и самим cloudflared —
+# его же проверка окружения показывает отказ и по UDP, и по TCP.
 services:
   db:
     image: postgres:18
@@ -85,30 +84,6 @@ services:
       # поддомен постоянный. Файла нет — туннель поднимается анонимно
       - ./secrets/lhr_ed25519:/key:ro
       - tunnel-state:/state
-    depends_on:
-      bot:
-        condition: service_healthy
-
-  # Профиль cf. Cloudflare Tunnel: постоянный адрес на своём домене без белого IP.
-  # cloudflared держит исходящее соединение до края Cloudflare, входящий 443 и
-  # сертификат остаются на стороне Cloudflare — поэтому nginx не нужен, а до
-  # bot:7070 идёт обычный http внутри сети compose.
-  #
-  # Нужны два файла: cloudflared/config.yml (id туннеля и ingress, в репозитории)
-  # и secrets/cloudflared/<id>.json (ключ туннеля, в .gitignore) — как их
-  # получить, см. README_BOT.md. Протокол http2, не QUIC: UDP/7844 провайдеры
-  # режут чаще, TCP/7844 до edge обычно открыт.
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: schedule-cloudflared
-    restart: unless-stopped
-    profiles: ["cf"]
-    command: --no-autoupdate --config /etc/cloudflared/config.yml tunnel run
-    volumes:
-      # ingress-правила: в репозитории, секретов не содержат
-      - ./cloudflared/config.yml:/etc/cloudflared/config.yml:ro
-      # учётные данные туннеля: только чтение, каталог в .gitignore
-      - ./secrets/cloudflared:/home/nonroot/.cloudflared:ro
     depends_on:
       bot:
         condition: service_healthy

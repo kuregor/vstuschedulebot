@@ -65,11 +65,10 @@ copy .env.example .env
 Дальше открыть `.env` и заполнить:
 
 * `BOT_TOKEN` — токен от @BotFather;
-* `COMPOSE_PROFILES` — какой туннель до публичного адреса поднимать в Docker:
-  `cf` (Cloudflare Tunnel, постоянный домен) или `lhr` (localhost.run, без
-  домена) — подробнее в «Адрес Mini App»;
-* `WEBAPP_URL` — постоянный адрес приложения для `cf`; для `lhr` оставить
-  пустым;
+* `COMPOSE_PROFILES` — оставить `lhr`: туннель localhost.run, ни домена, ни
+  аккаунта (подробнее в «Адрес Mini App»);
+* `WEBAPP_URL` — оставить пустым: для `lhr` адрес выдаётся при подключении и
+  бот читает его сам;
 * `DATABASE_URL` — нужен только для запуска без Docker; в контейнере он задаётся
   из `docker-compose.yml`;
 * `SCHEDULE_REFRESH_HOURS` — как часто сверять расписания с сайтом
@@ -120,11 +119,10 @@ docker compose up -d --build
 | `schedule-db` | PostgreSQL 18, данные в томе `vstu-pgdata` | `localhost:5433` |
 | `schedule-bot` | бот + веб-сервер Mini App (`webapp/` в том же процессе) | `localhost:7070` |
 
-и один из туннелей — какой, задаёт `COMPOSE_PROFILES` в `.env`:
+и туннель до публичного адреса:
 
 | профиль | контейнер | что делает |
 | --- | --- | --- |
-| `cf` | `schedule-cloudflared` | Cloudflare Tunnel: постоянный адрес `https://app.kuregor.ru` |
 | `lhr` | `schedule-tunnel` | localhost.run: временный адрес, ни домена, ни аккаунта |
 
 Внутри сети compose база зовётся `db:5432`, и `DATABASE_URL` для контейнера
@@ -147,48 +145,7 @@ docker compose down -v                                    :: удалить вм
 
 Telegram открывает приложения **только по HTTPS**, поэтому `http://localhost`
 не подойдёт: нужен туннель до публичного адреса. Вариантов два, выбор —
-`COMPOSE_PROFILES` в `.env`.
-
-#### `cf` — Cloudflare Tunnel, постоянный адрес
-
-`cloudflared` держит исходящее соединение до Cloudflare; входящий 443 и
-сертификат остаются на стороне Cloudflare, до `bot:7070` идёт обычный http
-внутри сети compose. Белый IP и nginx не нужны. Лучший вариант, **если
-провайдер его не блокирует** — см. «Провайдер блокирует Cloudflare» ниже:
-на части домашних сетей он не работает в принципе, и тогда остаётся `lhr`.
-Адрес не меняется, поэтому в `.env`:
-
-```
-COMPOSE_PROFILES=cf
-WEBAPP_URL=https://app.kuregor.ru
-```
-
-Нужны два файла: `cloudflared/config.yml` (id туннеля и ingress, лежит в
-репозитории) и ключ туннеля `secrets/cloudflared/<id>.json` (в `.gitignore`).
-Если ключа нет, туннель создаётся один раз локально установленным `cloudflared`
-(<https://github.com/cloudflare/cloudflared/releases>); домен должен быть
-заведён в Cloudflare:
-
-```cmd
-cloudflared tunnel login
-cloudflared tunnel create schedule
-cloudflared tunnel route dns schedule app.kuregor.ru
-```
-
-`create` печатает id туннеля и путь к `<id>.json` (обычно
-`%USERPROFILE%\.cloudflared\`). Файл копируется в `secrets\cloudflared\`, id
-прописывается в `cloudflared/config.yml` в строках `tunnel:` и
-`credentials-file:`.
-
-Проверка после `docker compose up -d --build`:
-
-```cmd
-docker compose logs cloudflared
-```
-
-В логе должно появиться `Registered tunnel connection`. Если вместо этого по
-кругу идут ошибки — провайдер блокирует Cloudflare Tunnel, см. «Провайдер
-блокирует Cloudflare» ниже.
+`COMPOSE_PROFILES=lhr` в `.env`.
 
 #### `lhr` — localhost.run, без домена
 
@@ -240,45 +197,6 @@ Telegram id есть в таблице `users`). Поэтому после пе�
 В BotFather ничего настраивать не нужно; если хотите постоянную кнопку с
 именем приложения — `/newapp` у @BotFather.
 
-#### Провайдер блокирует Cloudflare
-
-Встречаются два вида блокировки, различаются по логу `cloudflared`.
-
-**Режут DNS.** В логе — ошибки `lookup ... argotunnel.com`: SRV-запись
-`_v2-origintunneld._tcp.argotunnel.com` приходит пустой (A-записи при этом
-есть), и `cloudflared` не находит edge. Проверить:
-
-```cmd
-nslookup -type=SRV _v2-origintunneld._tcp.argotunnel.com
-```
-
-Если в ответе есть `region1.v2.argotunnel.com` — DNS в порядке. Если нет,
-рядом с `cloudflared` поднимается DoH-резолвер из `docker-compose.doh.yml`:
-в `.env` раскомментировать
-
-```
-COMPOSE_FILE=docker-compose.yml;docker-compose.doh.yml
-```
-
-(в Linux/macOS разделитель `:`), а в `secrets/ca-bundle.crt` положить
-корневые сертификаты для TLS до 1.1.1.1 — как их собрать, написано в самом
-`docker-compose.doh.yml`.
-
-**Режут TLS по имени.** DNS проходит (`precheck ... DNS Resolution ... pass`),
-но каждая попытка заканчивается `TLS handshake with edge error: EOF` на
-разных адресах `198.41.x.x`. Провайдер обрывает любое TLS-соединение с SNI
-`*.cftunnel.com` — на любой IP и порт, — а именно это имя `cloudflared`
-подставляет всегда, настройкой оно не меняется. Проверить можно из
-контейнера: рукопожатие с именем `argotunnel.com` проходит, с
-`h2.cftunnel.com` обрывается:
-
-```cmd
-docker run --rm alpine sh -c "apk add -q openssl && echo | openssl s_client -connect 198.41.192.27:7844 -servername h2.cftunnel.com 2>&1 | grep -E 'Cipher is|eof'"
-```
-
-Обход в рамках проекта невозможен (нужен VPN на всю машину). В такой сети
-используется профиль `lhr`.
-
 ### Долго грузится и пишет «Откройте приложение через Telegram»
 
 Приложение подключает мост Telegram (`window.Telegram.WebApp`) скриптом
@@ -315,7 +233,7 @@ WEBAPP_ALLOW_INSECURE=1
 
 С этим флагом приложение открывается по `http://localhost:7070` без подписи
 Telegram — удобно править вёрстку. Включать только при **остановленном
-туннеле** (`docker compose stop cloudflared` или `docker compose stop tunnel`,
+туннеле** (`docker compose stop tunnel`,
 смотря какой профиль): иначе API без проверки подписи
 окажется доступен любому, кто знает публичный адрес. На рабочем боте — `0`.
 
@@ -504,10 +422,7 @@ bot/
   utils/formatting.py     подписи дней, месяцев и недель
 scripts/parse_preview.py  разбор файла без бота
 scripts/tunnel.sh         SSH-реверс localhost.run + публикация адреса в /state/url
-cloudflared/config.yml    id туннеля Cloudflare и ingress (ключ — в secrets/, не в git)
 tests/                    тесты парсера, дат и каталога сайта
 Dockerfile                образ бота вместе с Mini App
-docker-compose.yml        стек: schedule-db / schedule-bot + туннель по профилю
-                          (cf: schedule-cloudflared, lhr: schedule-tunnel)
-docker-compose.doh.yml    дополнение к профилю cf для сетей, где режут DNS Cloudflare
+docker-compose.yml        стек: schedule-db / schedule-bot / schedule-tunnel
 ```
