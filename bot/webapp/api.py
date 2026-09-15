@@ -36,7 +36,7 @@ def semester_bounds() -> tuple[date, date]:
 # Версия формата ответа /api/schedule. Её поднимают руками, когда меняется
 # структура JSON: файл на сайте при этом прежний, ETag совпал бы, и у людей
 # в кэше остался бы ответ, который новое приложение уже не понимает.
-SCHEDULE_FORMAT_VERSION = 1
+SCHEDULE_FORMAT_VERSION = 2
 
 
 def schedule_etag(group: Group, stamp: str, today: date) -> str:
@@ -238,8 +238,8 @@ def week_occurrence(
     return spans[-1]
 
 
-def _week_range_label(week: int, start: date, end: date, today: date) -> str:
-    left, right = week_occurrence(week, start, end, today)
+def _week_range_label(span: tuple[date, date], today: date) -> str:
+    left, right = span
     if left.month == right.month:
         label = f"{left.day:02d}–{right.day:02d} {MONTH_SHORT[left.month - 1]}"
     else:
@@ -269,6 +269,7 @@ def schedule_json(
     for week in (1, 2):
         days_map = by_week.get(week, {})
         total = sum(len(v) for v in days_map.values())
+        span = week_occurrence(week, start, end, today)
         days = []
         for weekday in range(1, 7):
             items = sorted(days_map.get(weekday, []), key=lambda x: (x.slot_from, x.start_time))
@@ -287,7 +288,12 @@ def schedule_json(
             {
                 "id": week,
                 "label": f"НЕДЕЛЯ {week}",
-                "range": _week_range_label(week, start, end, today),
+                "range": _week_range_label(span, today),
+                # те же границы, но машинными датами: по ним приложение
+                # оставляет в списке только пары, которые в это повторение
+                # недели действительно идут (режим «Реальные пары»)
+                "from": span[0].isoformat(),
+                "to": span[1].isoformat(),
                 "count": plural_pairs(total),
                 "days": days,
             }

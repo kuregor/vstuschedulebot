@@ -20,6 +20,9 @@ const state = {
   tab: "list", filter: "both", data: null, lessons: new Map(), sheet: null,
   // экран настроек: каталог сайта, открытая шторка выбора и то, что в ней листают
   settings: null, picker: null, level: "", faculty: "", busy: false,
+  // «Реальные пары»: показывать только те, что идут на ближайшем повторении
+  // недели, — см. realLessons(). Выбор с экрана настроек, живёт в localStorage.
+  real: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -88,6 +91,27 @@ function writeCache(box) {
 function dropCache() {
   try {
     localStorage.removeItem(CACHE_KEY);
+  } catch (err) {
+    /* см. выше */
+  }
+}
+
+/* Режим показа списка — выбор с экрана настроек. Хранится отдельно от кэша
+   расписания: переключение не должно ронять сам кэш и заставлять приложение
+   идти в сеть. Обращения молчаливые по той же причине, что и у кэша. */
+const REAL_KEY = "vstu.real";
+
+function readReal() {
+  try {
+    return localStorage.getItem(REAL_KEY) === "1";
+  } catch (err) {
+    return false;
+  }
+}
+
+function writeReal(on) {
+  try {
+    localStorage.setItem(REAL_KEY, on ? "1" : "0");
   } catch (err) {
     /* см. выше */
   }
@@ -237,6 +261,36 @@ function renderTopbar() {
 
 /* ── вкладка «Расписание» ────────────────────────────────────────── */
 
+/* Пары дня, которые идут на этом повторении недели.
+
+   В шаблоне учебного отдела две пары могут делить один слот: у САПР-1.4 во
+   вторник недели 1 стоят и лаба (29.09, 27.10, …), и лекция (15.09, 13.10,
+   …) — обе в неделе 1, но в конкретный вторник идёт ровно одна. Приложение
+   рисует такой слот блоком «2 ПАРЫ», и какая будет на самом деле — не видно.
+
+   В режиме «Реальные пары» остаются те, у которых есть дата внутри границ
+   недели (week.from … week.to — ближайшее её повторение, оно же подписано в
+   шапке). Даты приходят строками «ГГГГ-ММ-ДД», поэтому сравниваются как есть.
+
+   Пары без дат остаются всегда: расчёт мог не найти ни одной (файл без
+   колонок с числами месяцев), и спрятать такую пару хуже, чем показать. */
+function realLessons(week, day) {
+  if (!state.real || !week.from || !week.to) return day.lessons;
+  return day.lessons.filter((lesson) => !lesson.dates.length
+    || lesson.dates.some((on) => on >= week.from && on <= week.to));
+}
+
+/* Подпись дня в режиме «реальные пары»: одна дата вместо перечня всех дат
+   этого дня за месяц («01 · 15 · 29 сент»). Берём её у самих пар — так она
+   точно про то, что показано ниже. */
+function realDayLabel(week, day) {
+  for (const lesson of day.lessons) {
+    const hit = lesson.dates.find((on) => on >= week.from && on <= week.to);
+    if (hit) return shortDate(hit);
+  }
+  return day.dates;
+}
+
 function groupByTime(lessons) {
   const order = [], map = new Map();
   lessons.forEach((lesson) => {
@@ -283,14 +337,20 @@ function renderList() {
   const weeks = state.data.weeks.filter((w) => state.filter === "both" || String(w.id) === state.filter);
 
   weeks.forEach((week) => {
+    // пустые дни в финальном макете скрыты; в режиме «реальные пары» день
+    // может опустеть и здесь — значит на этой неделе он свободен
+    const days = week.days
+      .map((day) => Object.assign({}, day, { lessons: realLessons(week, day) }))
+      .filter((day) => day.lessons.length);
+    const total = days.reduce((sum, day) => sum + day.lessons.length, 0);
+
     const block = el("div", "week");
     const head = el("div", `week-head${week.id === 2 ? " w2" : ""}`);
     head.append(el("span", "label", week.label), el("span", "range", week.range),
-      el("span", "count", week.count));
+      // счётчик с сервера считает весь шаблон недели, после фильтра он другой
+      el("span", "count", state.real ? pluralPairs(total).toLowerCase() : week.count));
     block.append(head);
 
-    // пустые дни в финальном макете скрыты
-    const days = week.days.filter((day) => day.lessons.length);
     if (!days.length) {
       const empty = el("div", "day empty");
       const line = el("div", "no-lessons");
@@ -304,7 +364,7 @@ function renderList() {
       const head2 = el("div", "day-head");
       head2.append(el("span", "short", day.short), el("span", "name", day.name));
       if (day.is_today) head2.append(el("span", "badge", "СЕГОДНЯ"));
-      head2.append(el("span", "dates", day.dates));
+      head2.append(el("span", "dates", state.real ? realDayLabel(week, day) : day.dates));
       card.append(head2);
 
       const slots = el("div", "slots");
@@ -564,6 +624,44 @@ function settingsRow(label, value, hint, onClick) {
   return row;
 }
 
+/* «14–19 сен и 21–26 сен» — границы ближайших повторений обеих недель.
+   Берём подписи, уже посчитанные сервером для шапок недель, только без
+   пометки «· сейчас»: здесь она не к месту. */
+function weekSpans() {
+  const weeks = state.data && !state.data.empty ? state.data.weeks : [];
+  const ranges = weeks.map((week) => week.range.replace(" · сейчас", ""));
+  return ranges.length === 2 ? `${ranges[0]} и ${ranges[1]}` : "";
+}
+
+/* Пункт «Список пар»: показывать шаблон недель целиком или только то, что
+   идёт на ближайшем повторении каждой недели (см. realLessons). */
+function viewCard() {
+  const card = el("div", "set-card");
+  card.append(el("div", "set-cap", "СПИСОК ПАР"));
+
+  const seg = el("div", "seg");
+  [[false, "Все пары"], [true, "Реальные пары"]].forEach(([value, label]) => {
+    const btn = el("button", state.real === value ? "on" : null, label);
+    btn.onclick = () => {
+      haptic();
+      state.real = value;
+      writeReal(value);
+      render();
+    };
+    seg.append(btn);
+  });
+  card.append(seg);
+
+  const spans = weekSpans();
+  card.append(el("div", "set-hint", state.real
+    ? (spans
+      ? `Только пары, которые идут ${spans}. Остальные — в «Календаре».`
+      : "Только пары, которые идут на ближайших двух неделях.")
+    : "Всё, что стоит в файле учебного отдела. Пары, делящие одно время, "
+      + "показываются одним блоком — идут они по очереди, в разные даты."));
+  return card;
+}
+
 function renderSettings() {
   const view = $("view");
   const wrap = el("div", "set");
@@ -604,6 +702,8 @@ function renderSettings() {
   rows.append(settingsRow("Группа", selectedGroup ? selectedGroup.name : "", "",
     () => openPicker("group")));
   wrap.append(rows);
+
+  wrap.append(viewCard());
 
   const note = el("div", "set-note");
   note.append(el("div", null, "Расписание с сайта ВолгГТУ, обновляется само."));
@@ -824,6 +924,7 @@ function syncViewportHeight() {
 }
 
 async function boot() {
+  state.real = readReal();
   if (tg) {
     tg.ready();
     tg.expand();

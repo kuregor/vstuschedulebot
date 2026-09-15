@@ -276,6 +276,11 @@ body::-webkit-scrollbar,
 .set-card > .set-cap { padding: 14px 13px 10px; }
 .set-cap { font-size: 10px; font-weight: 800; letter-spacing: 0.5px; color: rgba(23, 22, 26, 0.5); }
 .set-card > .seg { margin: 0 13px 13px; }
+/* пояснение под переключателем — тем же тоном, что и подписи строк настроек */
+.set-card > .set-hint {
+  padding: 0 13px 13px; margin-top: -4px;
+  font-size: 10.5px; font-weight: 500; line-height: 1.35; color: rgba(23, 22, 26, 0.5);
+}
 
 .set-rows { display: flex; flex-direction: column; padding: 4px 0; }
 .set-row {

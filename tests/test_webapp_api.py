@@ -6,31 +6,42 @@ from __future__ import annotations
 
 from datetime import date
 
-from bot.webapp.api import _week_range_label, schedule_etag, week_occurrence
+from bot.db.models import Group, ProgramLevel
+from bot.webapp.api import (
+    _week_range_label,
+    schedule_etag,
+    schedule_json,
+    week_occurrence,
+)
 
 START, END = date(2026, 9, 1), date(2026, 12, 31)
+
+
+def label(week: int, today: date) -> str:
+    """Подпись недели так, как её собирает schedule_json."""
+    return _week_range_label(week_occurrence(week, START, END, today), today)
 
 
 def test_current_week_is_marked():
     # 12 сентября — пятница недели 2 (семестр начался во вторник 1 сентября)
     today = date(2026, 9, 12)
     assert week_occurrence(2, START, END, today) == (date(2026, 9, 7), date(2026, 9, 12))
-    assert _week_range_label(2, START, END, today) == "07–12 сен · сейчас"
+    assert label(2, today) == "07–12 сен · сейчас"
 
 
 def test_other_week_shows_next_occurrence():
     # неделя 1 на этот момент уже прошла — показываем следующую такую же
     today = date(2026, 9, 12)
-    assert _week_range_label(1, START, END, today) == "14–19 сен"
+    assert label(1, today) == "14–19 сен"
 
 
 def test_label_moves_with_the_semester():
     # та же неделя 1, но в октябре — подпись другая
-    assert _week_range_label(1, START, END, date(2026, 10, 20)) == "26–31 окт"
+    assert label(1, date(2026, 10, 20)) == "26–31 окт"
 
 
 def test_week_across_two_months():
-    assert _week_range_label(1, START, END, date(2026, 10, 1)) == "28 сен – 03 окт · сейчас"
+    assert label(1, date(2026, 10, 1)) == "28 сен – 03 окт · сейчас"
 
 
 def test_first_week_starts_at_semester_start():
@@ -82,3 +93,14 @@ def test_etag_differs_between_groups():
     assert schedule_etag(FakeGroup(7), STAMP, today) != schedule_etag(
         FakeGroup(8), STAMP, today
     )
+
+
+def test_week_carries_machine_dates():
+    """Границы недели уходят клиенту и датами: по ним он оставляет в списке
+    только пары, которые на этом повторении недели действительно идут."""
+    group = Group(id=1, name="САПР-1.4", program_level=ProgramLevel.master, course=1)
+    weeks = schedule_json(group, [], today=date(2026, 9, 15))["weeks"]
+    assert [(w["from"], w["to"]) for w in weeks] == [
+        ("2026-09-14", "2026-09-19"),
+        ("2026-09-21", "2026-09-26"),
+    ]
