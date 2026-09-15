@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import date
 from pathlib import Path
 
 from aiohttp import web
@@ -12,7 +13,7 @@ from ..db.session import SessionLocal
 from ..services import schedule_service as svc
 from ..services import source_service as sources_svc
 from . import public_url
-from .api import schedule_json, settings_json, source_json
+from .api import schedule_etag, schedule_json, settings_json, source_json
 from .auth import InitDataError, user_id_from_init_data
 
 log = logging.getLogger(__name__)
@@ -94,7 +95,33 @@ async def handle_pick_source(request: web.Request) -> web.Response:
         )
 
 
+async def _remember_group(
+    session, user_id: int | None, requested: str | None, group_id: int
+) -> None:
+    """Запоминает выбор группы, чтобы бот и приложение показывали одно и то же.
+
+    Записываем только при настоящей смене: раньше строка пользователя
+    переписывалась на каждое открытие приложения, а это лишний UPDATE на
+    каждый запрос — в том числе на тот, что заканчивается ответом 304.
+    """
+    if user_id is None or not requested:
+        return
+    user = await svc.get_user(session, user_id)
+    if user is not None and user.group_id == group_id:
+        return
+    await svc.set_user_group(session, user_id, group_id)
+
+
 async def handle_schedule(request: web.Request) -> web.Response:
+    """Расписание группы; при неизменившемся файле — 304 без тела.
+
+    Пары и их даты — самая тяжёлая часть запроса (сотни строк на группу), а
+    меняются они только когда учебный отдел перевыложил файл на сайте.
+    Поэтому сначала считаем версию ответа по лёгким полям и сверяем её с
+    присланной: совпала — отвечаем 304, и ни lessons, ни lesson_dates из базы
+    не читаются вовсе. Приложение в этот момент уже показывает расписание из
+    своего кэша, так что для человека ответ мгновенный.
+    """
     user_id = _user_id(request)
     group_id = request.query.get("group_id")
 
@@ -115,14 +142,18 @@ async def handle_schedule(request: web.Request) -> web.Response:
                 }
             )
 
+        today = date.today()
+        stamp = await svc.source_stamp(session, group.source_id)
+        etag = schedule_etag(group, stamp, today)
+        if request.headers.get("If-None-Match") == etag:
+            await _remember_group(session, user_id, group_id, group.id)
+            return web.Response(status=304, headers={"ETag": etag})
+
         lessons = await svc.lessons_of_group(session, group.id)
-        payload = schedule_json(group, lessons)
+        payload = schedule_json(group, lessons, today, version=etag)
+        await _remember_group(session, user_id, group_id, group.id)
 
-        # Выбор группы запоминаем, чтобы бот и приложение показывали одно и то же.
-        if user_id is not None and group_id:
-            await svc.set_user_group(session, user_id, group.id)
-
-    return web.json_response(payload)
+    return web.json_response(payload, headers={"ETag": etag})
 
 
 async def handle_select_group(request: web.Request) -> web.Response:

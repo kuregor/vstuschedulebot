@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from ..db.models import Group, Lesson, User
+from ..db.models import Group, Lesson, ScheduleSource, User
 
 
 async def get_group(session: AsyncSession, group_id: int) -> Group | None:
@@ -29,6 +29,28 @@ async def set_user_group(session: AsyncSession, telegram_id: int, group_id: int)
     else:
         user.group_id = group_id
     await session.commit()
+
+
+async def source_stamp(session: AsyncSession, source_id: int | None) -> str:
+    """Метка версии файла, из которого собрано расписание группы.
+
+    ETag и Last-Modified меняются только когда учебный отдел перевыложил файл
+    на сайте, — в отличие от fetched_at, который обновляется на каждой
+    проверке, даже если сайт ответил 304. Поэтому метка годится в основу
+    ETag ответа: пока она та же, расписание группы не менялось.
+
+    Запрос лёгкий: одна строка по первичному ключу, без пар и их дат.
+    """
+    if source_id is None:
+        return ""
+    row = (
+        await session.execute(
+            select(ScheduleSource.etag, ScheduleSource.last_modified).where(
+                ScheduleSource.id == source_id
+            )
+        )
+    ).first()
+    return f"{row[0]}|{row[1]}" if row is not None else ""
 
 
 async def lessons_of_group(session: AsyncSession, group_id: int) -> list[Lesson]:

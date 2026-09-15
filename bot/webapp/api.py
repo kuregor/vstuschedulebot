@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
@@ -30,6 +31,37 @@ def semester_bounds() -> tuple[date, date]:
         date.fromisoformat(settings.semester_start),
         date.fromisoformat(settings.semester_end),
     )
+
+
+# Версия формата ответа /api/schedule. Её поднимают руками, когда меняется
+# структура JSON: файл на сайте при этом прежний, ETag совпал бы, и у людей
+# в кэше остался бы ответ, который новое приложение уже не понимает.
+SCHEDULE_FORMAT_VERSION = 1
+
+
+def schedule_etag(group: Group, stamp: str, today: date) -> str:
+    """Версия ответа /api/schedule — считается без чтения пар.
+
+    В неё входит всё, от чего ответ зависит: сама группа, версия её файла на
+    сайте (`stamp`), границы семестра и сегодняшняя дата. Дата обязательна:
+    в ответе есть is_today, current_week и подпись «· сейчас», поэтому даже с
+    неизменившимся файлом вчерашний ответ уже не годится.
+
+    Значение уезжает клиенту и в заголовке ETag, и полем `version` в теле:
+    из тела его достать проще, а в заголовке он нужен для условного запроса.
+    """
+    start, end = semester_bounds()
+    raw = "|".join(
+        [
+            str(SCHEDULE_FORMAT_VERSION),
+            str(group.id),
+            stamp,
+            today.isoformat(),
+            start.isoformat(),
+            end.isoformat(),
+        ]
+    )
+    return '"' + hashlib.sha1(raw.encode()).hexdigest()[:16] + '"'
 
 
 LEVEL_TITLES = [
@@ -220,7 +252,12 @@ def _week_range_label(week: int, start: date, end: date, today: date) -> str:
     return label
 
 
-def schedule_json(group: Group, lessons: list[Lesson], today: date | None = None) -> dict:
+def schedule_json(
+    group: Group,
+    lessons: list[Lesson],
+    today: date | None = None,
+    version: str = "",
+) -> dict:
     start, end = semester_bounds()
     today = today or date.today()
 
@@ -285,6 +322,9 @@ def schedule_json(group: Group, lessons: list[Lesson], today: date | None = None
         day += timedelta(days=1)
 
     return {
+        # По этой метке приложение потом спрашивает «не изменилось ли»
+        # и в ответ получает 304 без тела.
+        "version": version,
         "group": group_json(group),
         "semester": {
             "start": start.isoformat(),

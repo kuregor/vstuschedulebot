@@ -1,4 +1,4 @@
-"""Подписи недель в API приложения.
+"""Подписи недель и версия ответа в API приложения.
 
 Запуск:  python -m pytest tests -q
 """
@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from bot.webapp.api import _week_range_label, week_occurrence
+from bot.webapp.api import _week_range_label, schedule_etag, week_occurrence
 
 START, END = date(2026, 9, 1), date(2026, 12, 31)
 
@@ -44,3 +44,41 @@ def test_after_classes_last_week_stays():
     left, right = week_occurrence(1, START, END, date(2027, 3, 1))
     assert right <= END
     assert left <= right
+
+
+class FakeGroup:
+    """Для расчёта версии от группы нужен только её id."""
+
+    def __init__(self, group_id: int) -> None:
+        self.id = group_id
+
+
+STAMP = '"abc123"|Mon, 14 Sep 2026 10:00:00 GMT'
+
+
+def test_etag_holds_while_nothing_changes():
+    group, today = FakeGroup(7), date(2026, 9, 15)
+    assert schedule_etag(group, STAMP, today) == schedule_etag(group, STAMP, today)
+
+
+def test_etag_changes_when_site_file_changes():
+    # учебный отдел перевыложил файл — сайт отдал новые ETag/Last-Modified
+    group, today = FakeGroup(7), date(2026, 9, 15)
+    other = '"zzz999"|Tue, 15 Sep 2026 08:30:00 GMT'
+    assert schedule_etag(group, STAMP, today) != schedule_etag(group, other, today)
+
+
+def test_etag_changes_next_day():
+    # в ответе есть is_today, current_week и подпись «· сейчас» —
+    # со вчерашним кэшем они показывали бы не тот день
+    group = FakeGroup(7)
+    assert schedule_etag(group, STAMP, date(2026, 9, 15)) != schedule_etag(
+        group, STAMP, date(2026, 9, 16)
+    )
+
+
+def test_etag_differs_between_groups():
+    today = date(2026, 9, 15)
+    assert schedule_etag(FakeGroup(7), STAMP, today) != schedule_etag(
+        FakeGroup(8), STAMP, today
+    )

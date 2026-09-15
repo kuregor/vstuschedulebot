@@ -46,6 +46,53 @@ const haptic = (style = "light") => tg?.HapticFeedback?.impactOccurred?.(style);
 const API_TIMEOUT_MS = 7000;
 const API_ATTEMPTS = 3;
 
+/* ── кэш расписания на устройстве ──────────────────────────────────
+
+   Файл на сайте перевыкладывают раз в несколько дней, а приложение
+   открывают по несколько раз в день. Поэтому ответ /api/schedule лежит в
+   localStorage: при запуске расписание рисуется из него сразу, до всякой
+   сети, а у сервера спрашивается только «не изменилось ли». В запрос уходит
+   заголовок If-None-Match с меткой version из прошлого ответа — если файл
+   тот же, сервер отвечает 304 без тела и без чтения пар из базы.
+
+   Вторая польза — обрыв связи. Адрес быстрого туннеля меняется при
+   переподключении, и запросы из уже открытого окна уходят в никуда; теперь
+   на экране в этот момент остаётся расписание из кэша, а не ошибка.
+
+   localStorage бывает недоступен (приватный режим, запрет на данные сайтов)
+   и тогда бросает при любом обращении — поэтому все три функции молчаливые:
+   без кэша приложение просто работает как раньше. */
+const CACHE_KEY = "vstu.schedule";
+// Пока кэш моложе этого срока, сервер не спрашиваем вовсе: приложение часто
+// сворачивают и открывают снова, и такие серии запросов ничего не приносят.
+const CACHE_TRUST_MS = 5 * 60 * 1000;
+const NOT_MODIFIED = Symbol("not-modified");
+
+function readCache() {
+  try {
+    const box = JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
+    return box && box.data && box.etag ? box : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function writeCache(box) {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify(box));
+  } catch (err) {
+    /* переполнен или запрещён — обойдёмся без кэша */
+  }
+}
+
+function dropCache() {
+  try {
+    localStorage.removeItem(CACHE_KEY);
+  } catch (err) {
+    /* см. выше */
+  }
+}
+
 async function api(path, options = {}) {
   let lastError;
   for (let attempt = 1; attempt <= API_ATTEMPTS; attempt++) {
@@ -57,6 +104,9 @@ async function api(path, options = {}) {
       if (tg?.initData) headers["X-Telegram-Init-Data"] = tg.initData;
       const resp = await fetch(path,
         Object.assign({}, options, { headers, signal: controller.signal }));
+      // 304 — расписание не менялось, тела в ответе нет. Проверка идёт до
+      // resp.ok: там только 200-299, и иначе этот ответ ушёл бы в ошибку.
+      if (resp.status === 304) return NOT_MODIFIED;
       if (!resp.ok) {
         const err = new Error(await resp.text() || resp.statusText);
         err.final = resp.status >= 400 && resp.status < 500;
@@ -79,9 +129,7 @@ async function api(path, options = {}) {
   throw lastError;
 }
 
-async function loadSchedule(groupId) {
-  const query = groupId ? `?group_id=${groupId}` : "";
-  const data = await api(`/api/schedule${query}`);
+function applyData(data) {
   state.data = data;
   state.lessons = new Map();
   if (!data.empty) {
@@ -89,6 +137,30 @@ async function loadSchedule(groupId) {
       day.lessons.forEach((lesson) => state.lessons.set(lesson.id, lesson))));
   }
   render();
+}
+
+async function loadSchedule(groupId, etag = "") {
+  const query = groupId ? `?group_id=${groupId}` : "";
+  const data = await api(`/api/schedule${query}`,
+    etag ? { headers: { "If-None-Match": etag } } : {});
+
+  if (data === NOT_MODIFIED) {
+    // На экране уже то же самое — только продлеваем срок доверия кэшу.
+    const box = readCache();
+    if (box) {
+      box.checkedAt = Date.now();
+      writeCache(box);
+    }
+    return;
+  }
+
+  applyData(data);
+  if (data.empty || !data.version) {
+    // Группа ещё не выбрана — хранить нечего, а прошлый кэш уже не про неё.
+    dropCache();
+    return;
+  }
+  writeCache({ etag: data.version, checkedAt: Date.now(), data });
 }
 
 /* ── шапка ───────────────────────────────────────────────────────── */
@@ -636,6 +708,9 @@ async function pickGroup(group) {
     state.settings.selected.group_id = group.id;
     // Группа выбрана — в настройках больше делать нечего, показываем расписание.
     state.tab = "list";
+    // Кэш чистим до запроса: если он не дойдёт, на следующем запуске из
+    // кэша поднялось бы расписание прежней группы.
+    dropCache();
     await loadSchedule(group.id);
   } catch (err) {
     showError(explainFailure(err));
@@ -771,6 +846,20 @@ document.addEventListener("api-retry", (event) => {
 });
 
 async function loadInitial() {
+  const cached = readCache();
+  if (cached) {
+    applyData(cached.data);
+    if (Date.now() - cached.checkedAt < CACHE_TRUST_MS) return;
+    try {
+      // Без group_id: группу называет сервер. Если её сменили с другого
+      // устройства, метка не совпадёт и придёт уже новое расписание.
+      await loadSchedule("", cached.etag);
+    } catch (err) {
+      /* связи нет — на экране расписание из кэша, заменить его нечем */
+    }
+    return;
+  }
+
   showLoading();
   try {
     await loadSchedule();
