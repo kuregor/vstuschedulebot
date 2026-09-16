@@ -23,6 +23,8 @@ const state = {
   // «Реальные пары»: показывать только те, что идут на ближайшем повторении
   // недели, — см. realLessons(). Выбор с экрана настроек, живёт в localStorage.
   real: false,
+  // заметки: ключ «id пары|дата» -> текст; дата выбранная в шторке пары
+  notes: {}, sheetDate: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -114,6 +116,83 @@ function writeReal(on) {
     localStorage.setItem(REAL_KEY, on ? "1" : "0");
   } catch (err) {
     /* см. выше */
+  }
+}
+
+/* Заметки к парам. Ключ — «id пары|дата», как их присылает сервер: заметка
+   висит на конкретном занятии конкретного числа, а не на паре вообще.
+
+   Копия в localStorage нужна для первого кадра: расписание поднимается из
+   своего кэша мгновенно, и заметки должны появиться вместе с ним, а не через
+   секунду после ответа сервера. Дальше список перезаписывается ответом
+   /api/notes — он и есть истина. */
+const NOTES_KEY = "vstu.notes";
+
+function readNotes() {
+  try {
+    const box = JSON.parse(localStorage.getItem(NOTES_KEY) || "null");
+    return box && typeof box === "object" ? box : {};
+  } catch (err) {
+    return {};
+  }
+}
+
+function writeNotes(notes) {
+  try {
+    localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
+  } catch (err) {
+    /* переполнен или запрещён — обойдёмся без кэша */
+  }
+}
+
+const noteKey = (lessonId, iso) => `${lessonId}|${iso}`;
+const noteFor = (lessonId, iso) => state.notes[noteKey(lessonId, iso)] || "";
+
+/* Заметки одной пары по её датам, в порядке занятий. */
+function notesOfLesson(lesson) {
+  return lesson.dates
+    .map((iso) => ({ iso, text: noteFor(lesson.id, iso) }))
+    .filter((item) => item.text);
+}
+
+async function loadNotes(groupId = "") {
+  const query = groupId ? `?group_id=${groupId}` : "";
+  const data = await api(`/api/notes${query}`);
+  const notes = {};
+  (data.notes || []).forEach((item) => {
+    notes[noteKey(item.lesson_id, item.date)] = item.text;
+  });
+  state.notes = notes;
+  writeNotes(notes);
+}
+
+/* Сохранение заметки: пустой текст сервер понимает как «удалить».
+
+   На экране изменение показываем сразу, не дожидаясь ответа: человек уже
+   закрыл клавиатуру, и ждать сеть ему незачем. Если запрос не дошёл — правим
+   обратно и говорим об этом. */
+async function saveNote(lessonId, iso, text) {
+  const key = noteKey(lessonId, iso);
+  const before = state.notes[key] || "";
+  const clean = text.trim();
+  if (clean === before) return;
+
+  if (clean) state.notes[key] = clean;
+  else delete state.notes[key];
+  writeNotes(state.notes);
+  render();
+
+  try {
+    await api("/api/note", {
+      method: "POST",
+      body: JSON.stringify({ lesson_id: lessonId, date: iso, text: clean }),
+    });
+  } catch (err) {
+    if (before) state.notes[key] = before;
+    else delete state.notes[key];
+    writeNotes(state.notes);
+    render();
+    showToast("Заметка не сохранилась: " + explainFailure(err));
   }
 }
 
@@ -301,6 +380,27 @@ function groupByTime(lessons) {
   return order.map((key) => map.get(key));
 }
 
+/* Плашка заметки — из макета: тонкая полоса слева, дата мелким моноширинным
+   и сам текст. В шторке дня дата не нужна: она там и так в заголовке. */
+function noteLine(dateLabel, text) {
+  const row = el("div", "note");
+  row.append(el("span", "note-bar"));
+  const body = el("div", "note-body");
+  if (dateLabel) body.append(el("div", "note-date", dateLabel));
+  body.append(el("div", "note-text", text));
+  row.append(body);
+  return row;
+}
+
+/* Короткое сообщение внизу экрана: сейчас — единственное место, где человеку
+   нужно сказать, что правка не уехала на сервер. */
+function showToast(text) {
+  document.querySelector(".toast")?.remove();
+  const box = el("div", "toast", text);
+  document.body.append(box);
+  setTimeout(() => box.remove(), 3500);
+}
+
 function lessonNode(lesson) {
   const node = el("button", "lesson");
   const bar = el("div", "lesson-bar");
@@ -324,6 +424,13 @@ function lessonNode(lesson) {
     main.append(el("div", "lesson-dates", shown + tail));
   } else if (lesson.note) {
     main.append(el("div", "lesson-dates", lesson.note));
+  }
+
+  const notes = notesOfLesson(lesson);
+  if (notes.length) {
+    const box = el("div", "notes");
+    notes.forEach((item) => box.append(noteLine(shortDate(item.iso), item.text)));
+    main.append(box);
   }
 
   node.append(bar, main);
@@ -490,10 +597,115 @@ function openSheet(build) {
 }
 
 function closeSheet() {
+  // Поле заметки исчезает вместе со шторкой, и blur в этот момент приходит не
+  // во всех браузерах — забираем текст сами, пока элемент ещё на месте.
+  const input = document.querySelector(".note-input");
+  if (input && input.dataset.lesson) {
+    saveNote(Number(input.dataset.lesson), input.dataset.date, input.value);
+  }
   $("sheet-root").hidden = true;
   $("sheet-root").replaceChildren();
   state.sheet = null;
   tg?.BackButton?.hide?.();
+}
+
+/* Даты занятия и заметка на выбранную дату — сердце шторки пары.
+
+   Дата выбирается чипом: по умолчанию ближайшая будущая (а если занятия
+   кончились — последняя). На чипах с заметкой стоит точка, так что видно,
+   где что записано, не перебирая даты по одной.
+
+   Заметка сохраняется, когда человек уходит из поля: на каждый набранный
+   символ ходить на сервер незачем. Шторка закрывается — правка тоже
+   сохраняется (см. closeSheet). */
+function datesAndNote(lesson) {
+  const box = el("div", "dates-note");
+  const dates = lesson.dates;
+  const today = state.data?.semester?.today || "";
+  if (!dates.includes(state.sheetDate)) {
+    state.sheetDate = dates.find((iso) => iso >= today) || dates[dates.length - 1];
+  }
+  let editing = false;
+
+  const cap = el("div", "sheet-cap");
+  cap.append(el("span", null, "ДАТЫ ЗАНЯТИЙ"), el("span", "cap-note", "выберите дату"));
+  const chips = el("div", "chips");
+  const editor = el("div", "note-editor");
+
+  const paintChips = () => {
+    chips.replaceChildren();
+    dates.forEach((iso) => {
+      const on = iso === state.sheetDate;
+      const chip = el("button", `chip pick${on ? " on" : ""}`, shortDate(iso));
+      if (noteFor(lesson.id, iso)) chip.append(el("span", "chip-dot"));
+      chip.onclick = () => {
+        haptic();
+        state.sheetDate = iso;
+        editing = false;
+        paintChips();
+        paintEditor();
+      };
+      chips.append(chip);
+    });
+  };
+
+  const paintEditor = () => {
+    editor.replaceChildren();
+    const iso = state.sheetDate;
+    const text = noteFor(lesson.id, iso);
+
+    if (!text && !editing) {
+      const add = el("button", "note-add");
+      add.append(el("span", "plus", "+"), el("span", "label", "Заметка"),
+        el("span", "when", shortDate(iso)));
+      add.onclick = () => { haptic(); editing = true; paintEditor(); };
+      editor.append(add);
+      return;
+    }
+
+    const head = el("div", "sheet-cap");
+    head.append(el("span", null, `ЗАМЕТКА НА ${shortDate(iso)}`));
+    if (text) {
+      const drop = el("button", "note-drop", "Удалить");
+      drop.onclick = () => {
+        haptic();
+        editing = false;
+        saveNote(lesson.id, iso, "");
+        paintChips();
+        paintEditor();
+      };
+      head.append(drop);
+    }
+    editor.append(head);
+
+    if (editing) {
+      const input = el("textarea", "note-input");
+      input.value = text;
+      input.rows = 3;
+      input.maxLength = 500;
+      input.placeholder = "Что принести, что сдать, ссылки…";
+      // сервер узнаёт о правке отсюда и из closeSheet — по этим данным
+      input.dataset.lesson = lesson.id;
+      input.dataset.date = iso;
+      input.onblur = () => {
+        editing = false;
+        saveNote(lesson.id, iso, input.value);
+        paintChips();
+        paintEditor();
+      };
+      editor.append(input);
+      setTimeout(() => input.focus(), 60);
+    } else {
+      const view = el("button", "note-view", text);
+      view.onclick = () => { haptic(); editing = true; paintEditor(); };
+      editor.append(view);
+    }
+  };
+
+  paintChips();
+  paintEditor();
+  box.append(cap, chips, editor);
+  return box;
 }
 
 function openLessonSheet(lesson) {
@@ -519,14 +731,15 @@ function openLessonSheet(lesson) {
     facts.append(timeFact, roomFact);
     sheet.append(facts);
 
-    sheet.append(el("div", "sheet-cap", "ДАТЫ ЗАНЯТИЙ"));
-    const chips = el("div", "chips");
     if (lesson.dates.length) {
-      lesson.dates.forEach((d) => chips.append(el("span", "chip", shortDate(d))));
+      sheet.append(datesAndNote(lesson));
     } else {
+      // дат нет — вешать заметку не на что, показываем только текст из файла
+      sheet.append(el("div", "sheet-cap", "ДАТЫ ЗАНЯТИЙ"));
+      const chips = el("div", "chips");
       chips.append(el("span", "chip", lesson.note || "нет данных"));
+      sheet.append(chips);
     }
-    sheet.append(chips);
 
     if (lesson.note) {
       sheet.append(el("div", "sheet-cap", "В ФАЙЛЕ РАСПИСАНИЯ"));
@@ -573,6 +786,9 @@ function openDaySheet(isoDate, ids) {
       if (lesson.room) meta.append(el("span", "lesson-room", lesson.room));
       if (lesson.teacher) meta.append(el("span", "lesson-teacher", lesson.teacher));
       main.append(meta);
+
+      const note = noteFor(lesson.id, isoDate);
+      if (note) main.append(noteLine("", note));
 
       row.append(time, bar, main);
       list.append(row);
@@ -846,7 +1062,10 @@ async function pickGroup(group) {
     // Кэш чистим до запроса: если он не дойдёт, на следующем запуске из
     // кэша поднялось бы расписание прежней группы.
     dropCache();
+    state.notes = {};
+    writeNotes(state.notes);
     await loadSchedule(group.id);
+    refreshNotes(group.id);
   } catch (err) {
     showError(explainFailure(err));
   } finally {
@@ -903,7 +1122,9 @@ function render() {
   }
 
   syncTopbarHeight();
-  window.scrollTo({ top: 0 });
+  // при открытой шторке список остаётся там, где его листали: правка заметки
+  // перерисовывает экран под шторкой, и прыжок наверх был бы заметен
+  if (!state.sheet) window.scrollTo({ top: 0 });
 }
 
 function loadingBox(text) {
@@ -981,10 +1202,19 @@ document.addEventListener("api-retry", (event) => {
   }
 });
 
+/* Заметки тянем всегда, даже когда расписание взято из кэша: их правят чаще
+   расписания, в том числе с другого устройства, а весят они считанные байты.
+   Молча — без сети на экране остаются заметки из прошлого запуска. */
+function refreshNotes(groupId = "") {
+  loadNotes(groupId).then(render).catch(() => {});
+}
+
 async function loadInitial() {
+  state.notes = readNotes();
   const cached = readCache();
   if (cached) {
     applyData(cached.data);
+    refreshNotes();
     if (Date.now() - cached.checkedAt < CACHE_TRUST_MS) return;
     try {
       // Без group_id: группу называет сервер. Если её сменили с другого
@@ -999,6 +1229,7 @@ async function loadInitial() {
   showLoading();
   try {
     await loadSchedule();
+    refreshNotes();
   } catch (err) {
     showError(explainFailure(err), loadInitial);
   }

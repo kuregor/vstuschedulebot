@@ -10,6 +10,7 @@ from aiohttp import web
 
 from ..config import settings
 from ..db.session import SessionLocal
+from ..services import notes_service as notes_svc
 from ..services import schedule_service as svc
 from ..services import source_service as sources_svc
 from . import public_url
@@ -169,6 +170,55 @@ async def handle_select_group(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "saved": True})
 
 
+async def _group_for(session, request: web.Request, user_id: int | None) -> int | None:
+    """Группа запроса: из адреса, иначе выбранная человеком в настройках."""
+    asked = request.query.get("group_id")
+    if asked:
+        return int(asked)
+    user = await svc.get_user(session, user_id) if user_id is not None else None
+    return user.group_id if user else None
+
+
+async def handle_notes(request: web.Request) -> web.Response:
+    """Заметки человека по его группе.
+
+    Отдельно от расписания нарочно: расписание меняется раз в несколько дней
+    и живёт в кэше по ETag, а заметки человек правит прямо сейчас. Смешать их
+    в один ответ значило бы сбрасывать кэш расписания на каждую правку.
+    """
+    user_id = _user_id(request)
+    if user_id is None:
+        return web.json_response({"notes": []})
+    async with SessionLocal() as session:
+        group_id = await _group_for(session, request, user_id)
+        if not group_id:
+            return web.json_response({"notes": []})
+        notes = await notes_svc.list_notes(session, user_id, group_id)
+    return web.json_response({"notes": notes})
+
+
+async def handle_set_note(request: web.Request) -> web.Response:
+    """Запись заметки к паре на дату; пустой текст её удаляет."""
+    user_id = _user_id(request)
+    body = await request.json()
+    try:
+        lesson_id = int(body.get("lesson_id", 0))
+        on_date = date.fromisoformat(str(body.get("date", "")))
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="Не указана пара или дата заметки") from exc
+
+    if user_id is None:  # отладка без подписи Telegram — сохранять некому
+        return web.json_response({"ok": True, "saved": False})
+
+    async with SessionLocal() as session:
+        saved = await notes_svc.set_note(
+            session, user_id, lesson_id, on_date, str(body.get("text", ""))
+        )
+    if not saved:
+        raise web.HTTPNotFound(text="Такой пары в этот день в расписании нет")
+    return web.json_response({"ok": True, "saved": True})
+
+
 async def handle_notify(request: web.Request) -> web.Response:
     """Переключатель «писать ли об изменениях расписания».
 
@@ -252,6 +302,8 @@ def create_app() -> web.Application:
             web.post("/api/source", handle_pick_source),
             web.post("/api/group", handle_select_group),
             web.post("/api/notify", handle_notify),
+            web.get("/api/notes", handle_notes),
+            web.post("/api/note", handle_set_note),
             web.static("/static", STATIC_DIR),
         ]
     )

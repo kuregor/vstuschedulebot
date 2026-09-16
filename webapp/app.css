@@ -332,3 +332,70 @@ body::-webkit-scrollbar,
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg) } }
+
+/* ── заметки к парам ─────────────────────────────────────────────── */
+
+/* Плашка заметки под парой: тонкая полоса, дата и текст. Серая, а не
+   цветная: цвет в списке уже занят типом занятия, и второй цветовой ряд
+   спорил бы с ним. */
+.notes { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
+.note { display: flex; gap: 7px; padding: 7px 8px; border-radius: 9px; background: rgba(23, 22, 26, 0.055); }
+.note-bar { width: 2px; border-radius: 1px; background: rgba(23, 22, 26, 0.28); flex: none; }
+.note-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.note-date { font-family: 'JetBrains Mono', monospace; font-size: 9.5px; font-weight: 700; color: rgba(23, 22, 26, 0.5); }
+.note-text { font-size: 10.5px; font-weight: 600; line-height: 1.35; color: rgba(23, 22, 26, 0.72); text-wrap: pretty; }
+
+/* Шапка секции шторки умеет держать подпись справа («выберите дату») и
+   кнопку «Удалить» — поэтому flex, а не просто строка текста. */
+.sheet-cap { display: flex; align-items: baseline; gap: 7px; }
+.sheet-cap .cap-note { font-size: 9.5px; font-weight: 500; letter-spacing: 0; color: rgba(23, 22, 26, 0.42); }
+
+/* Чип даты: выбранная — тёмная, с заметкой — с точкой в углу. */
+.chip.pick {
+  position: relative; cursor: pointer; font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 500; padding: 6px 9px; border-radius: 9px;
+  border: 1px solid rgba(23, 22, 26, 0.08); background: var(--chip); color: var(--ink);
+}
+.chip.pick.on { background: var(--ink); border-color: var(--ink); color: var(--card); font-weight: 700; }
+.chip.pick:active { filter: brightness(0.97); }
+.chip-dot { position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); }
+.chip.pick.on .chip-dot { background: oklch(0.82 0.08 155); }
+
+.note-editor { margin-top: 14px; }
+.note-add {
+  display: flex; align-items: center; gap: 8px; width: 100%; cursor: pointer;
+  border: 1px dashed rgba(23, 22, 26, 0.2); background: transparent;
+  padding: 12px 13px; border-radius: 12px; font-family: inherit; color: var(--ink);
+}
+.note-add:active { background: rgba(23, 22, 26, 0.03); }
+.note-add .plus { display: flex; align-items: center; justify-content: center; width: 18px; flex: none; font-size: 20px; font-weight: 700; line-height: 1; color: var(--accent); }
+.note-add .label { font-size: 12.5px; font-weight: 700; white-space: nowrap; }
+.note-add .when { margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 600; color: rgba(23, 22, 26, 0.45); }
+
+.note-drop { margin-left: auto; border: 0; background: transparent; cursor: pointer; font-family: inherit; font-size: 10px; font-weight: 700; color: var(--lab); padding: 0; }
+.note-drop:active { opacity: 0.7; }
+
+.note-input {
+  width: 100%; box-sizing: border-box; resize: none; font-family: inherit;
+  font-size: 12.5px; font-weight: 600; line-height: 1.4; color: var(--ink);
+  background: var(--card); border: 1px solid var(--accent); border-radius: 12px;
+  padding: 10px 12px; outline: none;
+}
+.note-view {
+  display: block; width: 100%; text-align: left; cursor: pointer;
+  border: 1px solid rgba(23, 22, 26, 0.09); background: var(--chip);
+  padding: 10px 12px; border-radius: 12px; font-family: inherit;
+  font-size: 12.5px; font-weight: 600; line-height: 1.4; color: var(--ink);
+  text-wrap: pretty;
+}
+.note-view:active { filter: brightness(0.98); }
+
+/* Единственное, о чём приложению приходится говорить всплывающим сообщением:
+   правка заметки не уехала на сервер. */
+.toast {
+  position: fixed; left: 14px; right: 14px; bottom: calc(86px + var(--safe-bottom));
+  z-index: 70; padding: 11px 13px; border-radius: 12px;
+  background: rgba(23, 22, 26, 0.92); color: var(--card);
+  font-size: 12px; font-weight: 600; line-height: 1.35; text-align: center;
+  animation: fade 0.18s ease;
+}

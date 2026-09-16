@@ -206,3 +206,40 @@ class ScheduleChange(Base):
     )
 
     group: Mapped[Group] = relationship(lazy="joined")
+
+
+class LessonNote(Base):
+    """Заметка человека к паре на конкретную дату.
+
+    Привязка не к строке `lessons`, а к месту пары в расписании: группа,
+    дата, номер слота и название предмета. Строки `lessons` живут только до
+    следующего перезалива файла — учебный отдел правит файл, старые пары
+    удаляются и создаются заново с новыми id, и заметка, привязанная к id,
+    исчезла бы вместе с ними.
+    """
+
+    __tablename__ = "lesson_notes"
+    __table_args__ = (
+        UniqueConstraint(
+            "telegram_id",
+            "group_id",
+            "on_date",
+            "slot_from",
+            "subject_key",
+            name="uq_note_place",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), index=True
+    )
+    on_date: Mapped[date] = mapped_column(Date, index=True)
+    slot_from: Mapped[int] = mapped_column(Integer)
+    # название предмета в свёрнутом виде: регистр и лишние пробелы не в счёт
+    subject_key: Mapped[str] = mapped_column(String(200))
+    text: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
