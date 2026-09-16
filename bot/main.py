@@ -19,6 +19,7 @@ from aiogram.types import (
 from .config import settings
 from .db.session import SessionLocal, init_db
 from .handlers import schedule
+from .services import notify_service
 from .services import schedule_service as svc
 from .services import source_service
 from .webapp import public_url
@@ -30,6 +31,10 @@ from .webapp.server import start_webapp
 POLL_PUBLIC_URL_SECONDS = 5
 # Пауза между чатами: Telegram не любит очередь запросов без передышки
 MENU_BUTTON_PAUSE_SECONDS = 0.05
+# Как часто заглядывать в очередь уведомлений об изменениях расписания.
+# Сами изменения появляются редко, но ждать их в очереди незачем: проверка —
+# один запрос по индексу.
+NOTIFY_POLL_SECONDS = 30
 
 logging.basicConfig(
     level=logging.INFO,
@@ -125,6 +130,20 @@ async def _keep_schedules_fresh() -> None:
         await asyncio.sleep(settings.refresh_hours * 3600)
 
 
+async def _deliver_changes(bot: Bot) -> None:
+    """Разносит уведомления о правках расписания, которые нашёл импорт.
+
+    Отдельной задачей, а не сразу после разбора файла: обновление идёт пачкой
+    по всему каталогу сайта, и рассылка посреди него растянула бы загрузку.
+    """
+    while True:
+        try:
+            await notify_service.send_pending(bot)
+        except Exception:  # сеть или лимиты Telegram — повторим на следующем круге
+            log.exception("Рассылка уведомлений не удалась")
+        await asyncio.sleep(NOTIFY_POLL_SECONDS)
+
+
 async def main() -> None:
     if not settings.bot_token:
         raise SystemExit("Не задан BOT_TOKEN — заполните .env (см. .env.example)")
@@ -141,6 +160,7 @@ async def main() -> None:
     await _set_commands(bot)
     menu_keeper = asyncio.create_task(_keep_menu_button(bot))
     refresher = asyncio.create_task(_keep_schedules_fresh())
+    notifier = asyncio.create_task(_deliver_changes(bot))
 
     # Веб-сервер Mini App живёт в том же процессе, что и бот.
     runner = await start_webapp()
@@ -150,6 +170,7 @@ async def main() -> None:
     finally:
         menu_keeper.cancel()
         refresher.cancel()
+        notifier.cancel()
         await runner.cleanup()
 
 

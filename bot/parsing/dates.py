@@ -24,6 +24,19 @@ from statistics import median
 
 from .classify import DATE_RE, FROM_DATE_RE
 
+# Откуда взялись даты занятия. Важно не для показа, а для сравнения двух
+# версий расписания: «посчитанные» даты (ORIGIN_CALC) меняются от одних лишь
+# границ семестра и расходятся с файлом в каждом четвёртом блоке, поэтому
+# уведомлять об их изменении нельзя — это был бы шум, а не новость.
+ORIGIN_NOTE = "note"  # перечень дат в заметке к паре — самое точное
+ORIGIN_FILE = "file"  # колонки с числами месяцев в самом файле
+ORIGIN_CALC = "calc"  # расчёт по чётности недели, страховка на бедный файл
+
+# Версия правил расчёта. Её поднимают руками, когда меняется логика этого
+# модуля: даты в базе посчитаны прежними правилами, и разница между ними и
+# новыми — не правка учебного отдела, а наша собственная.
+DATES_ALGO_VERSION = 1
+
 
 def first_monday(semester_start: date) -> date:
     """Понедельник недели, в которую попадает начало семестра (может быть раньше него)."""
@@ -120,22 +133,25 @@ def recurring_dates(
     return out
 
 
-def lesson_dates(
+def resolve_dates(
     note: str,
     weekday: int,
     week: int,
     semester_start: date,
     semester_end: date,
     block_dates: list[tuple[int, int]] | None = None,
-) -> list[date]:
+) -> tuple[str, list[date]]:
+    """Даты занятия вместе с их происхождением -> (ORIGIN_*, даты)."""
     note = note or ""
     explicit = explicit_dates(note, semester_start, semester_end)
     if explicit:
-        return explicit
+        return ORIGIN_NOTE, explicit
 
     # даты дня из файла, иначе — расчёт по чётности недели
+    origin = ORIGIN_FILE
     base = dates_from_pairs(block_dates or [], semester_start, semester_end)
     if not base:
+        origin = ORIGIN_CALC
         base = recurring_dates(weekday, week, semester_start, semester_end)
 
     from_match = FROM_DATE_RE.search(note)
@@ -145,6 +161,19 @@ def lesson_dates(
             threshold = date(_year_for_month(month, semester_start), month, day)
         except ValueError:
             threshold = semester_start
-        return [d for d in base if d >= threshold]
+        return origin, [d for d in base if d >= threshold]
 
-    return base
+    return origin, base
+
+
+def lesson_dates(
+    note: str,
+    weekday: int,
+    week: int,
+    semester_start: date,
+    semester_end: date,
+    block_dates: list[tuple[int, int]] | None = None,
+) -> list[date]:
+    return resolve_dates(
+        note, weekday, week, semester_start, semester_end, block_dates
+    )[1]

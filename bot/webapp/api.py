@@ -103,6 +103,7 @@ def settings_json(
     sources: list[ScheduleSource],
     groups: list[Group],
     selected_group: Group | None,
+    notify: bool = True,
 ) -> dict:
     """Данные экрана настроек: уровень -> факультет -> курс (файл) -> группа.
 
@@ -144,6 +145,7 @@ def settings_json(
     return {
         "levels": levels,
         "groups": [{"id": g.id, "name": g.name} for g in groups],
+        "notify": notify,
         "selected": {
             "level": selected_source.program_level.value if selected_source else "",
             "faculty": (selected_source.faculty or selected_source.dep)

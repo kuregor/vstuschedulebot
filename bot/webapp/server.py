@@ -59,15 +59,17 @@ async def handle_settings(request: web.Request) -> web.Response:
         if not sources:
             sources = await sources_svc.sync_catalog(session)
         selected = None
+        notify = True
         if user_id is not None:
             user = await svc.get_user(session, user_id)
             selected = user.group if user and user.group_id else None
+            notify = user.notify if user is not None else True
         groups = (
             await sources_svc.groups_of_source(session, selected.source_id)
             if selected is not None and selected.source_id
             else []
         )
-        return web.json_response(settings_json(sources, groups, selected))
+        return web.json_response(settings_json(sources, groups, selected, notify))
 
 
 async def handle_pick_source(request: web.Request) -> web.Response:
@@ -167,6 +169,22 @@ async def handle_select_group(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "saved": True})
 
 
+async def handle_notify(request: web.Request) -> web.Response:
+    """Переключатель «писать ли об изменениях расписания».
+
+    В гостевом режиме (отладка без подписи Telegram) сохранять некому —
+    отвечаем честно, что не сохранили.
+    """
+    user_id = _user_id(request)
+    body = await request.json()
+    on = bool(body.get("on", True))
+    if user_id is None:
+        return web.json_response({"ok": True, "saved": False, "on": on})
+    async with SessionLocal() as session:
+        await svc.set_user_notify(session, user_id, on)
+    return web.json_response({"ok": True, "saved": True, "on": on})
+
+
 async def handle_health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
@@ -233,6 +251,7 @@ def create_app() -> web.Application:
             web.get("/api/settings", handle_settings),
             web.post("/api/source", handle_pick_source),
             web.post("/api/group", handle_select_group),
+            web.post("/api/notify", handle_notify),
             web.static("/static", STATIC_DIR),
         ]
     )

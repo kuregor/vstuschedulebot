@@ -662,6 +662,40 @@ function viewCard() {
   return card;
 }
 
+/* Пункт «Уведомления»: писать ли в чат, когда расписание группы изменилось.
+
+   Хранится у бота, а не в localStorage: сообщение отправляет он сам, и знать
+   об отказе должен он же. Значение приходит в /api/settings. */
+function notifyCard() {
+  const card = el("div", "set-card");
+  card.append(el("div", "set-cap", "УВЕДОМЛЕНИЯ"));
+  const on = state.settings.notify !== false;
+
+  const seg = el("div", "seg");
+  [[true, "Включены"], [false, "Выключены"]].forEach(([value, label]) => {
+    const btn = el("button", on === value ? "on" : null, label);
+    btn.onclick = () => {
+      haptic();
+      state.settings.notify = value;
+      render();
+      api("/api/notify", { method: "POST", body: JSON.stringify({ on: value }) })
+        .catch(() => {
+          // не сохранилось — возвращаем переключатель туда, где он был
+          state.settings.notify = !value;
+          render();
+        });
+    };
+    seg.append(btn);
+  });
+  card.append(seg);
+
+  card.append(el("div", "set-hint", on
+    ? "Бот напишет, когда учебный отдел перевыложит файл и в расписании группы "
+      + "что-то изменится: новая пара, другая аудитория или преподаватель."
+    : "Бот молчит об изменениях. Расписание в приложении всё равно обновляется само."));
+  return card;
+}
+
 function renderSettings() {
   const view = $("view");
   const wrap = el("div", "set");
@@ -704,6 +738,7 @@ function renderSettings() {
   wrap.append(rows);
 
   wrap.append(viewCard());
+  wrap.append(notifyCard());
 
   const note = el("div", "set-note");
   note.append(el("div", null, "Расписание с сайта ВолгГТУ, обновляется само."));

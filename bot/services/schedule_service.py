@@ -31,6 +31,16 @@ async def set_user_group(session: AsyncSession, telegram_id: int, group_id: int)
     await session.commit()
 
 
+async def set_user_notify(session: AsyncSession, telegram_id: int, on: bool) -> None:
+    """Включает или выключает сообщения об изменениях расписания."""
+    user = await get_user(session, telegram_id)
+    if user is None:
+        session.add(User(telegram_id=telegram_id, notify=on))
+    else:
+        user.notify = on
+    await session.commit()
+
+
 async def source_stamp(session: AsyncSession, source_id: int | None) -> str:
     """Метка версии файла, из которого собрано расписание группы.
 

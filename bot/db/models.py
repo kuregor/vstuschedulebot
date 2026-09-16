@@ -67,6 +67,10 @@ class ScheduleSource(Base):
     # файла стоит один запрос без тела (304), а не скачивание заново.
     etag: Mapped[str] = mapped_column(String(128), default="")
     last_modified: Mapped[str] = mapped_column(String(64), default="")
+    # Правила расчёта дат на момент прошлого импорта: «начало|конец|версия».
+    # Не совпали с нынешними — значит даты пересчитались от наших настроек, а
+    # не от правки учебного отдела, и сравнивать их в этот раз нельзя.
+    date_basis: Mapped[str] = mapped_column(String(64), default="")
 
 
 class Group(Base):
@@ -117,6 +121,10 @@ class Lesson(Base):
         Enum(LessonType, name="lesson_type"), default=LessonType.sem
     )
     raw_note: Mapped[str] = mapped_column(Text, default="")
+    # Откуда взялись даты занятия: note (перечень в заметке), file (колонки
+    # месяцев) или calc (расчёт по чётности). Нужно при сравнении двух версий
+    # расписания — см. bot/parsing/dates.py.
+    date_origin: Mapped[str] = mapped_column(String(8), default="calc")
 
     group: Mapped[Group] = relationship(back_populates="lessons")
     dates: Mapped[list["LessonDate"]] = relationship(
@@ -146,6 +154,8 @@ class User(Base):
     group_id: Mapped[int | None] = mapped_column(
         ForeignKey("groups.id", ondelete="SET NULL")
     )
+    # Писать ли человеку, когда расписание его группы изменилось.
+    notify: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -170,3 +180,29 @@ class ImportLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class ScheduleChange(Base):
+    """Что изменилось в расписании группы, когда учебный отдел правил файл.
+
+    Строка появляется при перезаливе файла, если разбор дал не то, что лежало
+    в базе. Рассылка идёт отдельной задачей и отмечает `notified`: между
+    импортом и отправкой бот может перезапуститься, а сообщение потеряться
+    не должно.
+    """
+
+    __tablename__ = "schedule_changes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), index=True
+    )
+    # готовый текст сообщения: собрать его проще там, где известны старые пары
+    summary: Mapped[str] = mapped_column(Text, default="")
+    count: Mapped[int] = mapped_column(Integer, default=0)
+    notified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    group: Mapped[Group] = relationship(lazy="joined")

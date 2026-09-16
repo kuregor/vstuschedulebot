@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import tempfile
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 from urllib.parse import quote, unquote, urlparse
@@ -13,10 +15,22 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
-from ..db.models import Group, ImportLog, Lesson, LessonDate, LessonType, ProgramLevel
-from ..parsing.dates import lesson_dates
+from ..db.models import (
+    Group,
+    ImportLog,
+    Lesson,
+    LessonDate,
+    LessonType,
+    ProgramLevel,
+    ScheduleChange,
+    ScheduleSource,
+)
+from ..parsing.dates import DATES_ALGO_VERSION, resolve_dates
 from ..parsing.vstu_xls import LEVEL_MASTER, ParsedSchedule, parse_workbook
 from ..parsing.workbook import OLE_MAGIC, ZIP_MAGIC
+from . import changes as changes_svc
+
+log = logging.getLogger(__name__)
 
 DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=60)
 MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -38,6 +52,17 @@ def _semester_bounds() -> tuple[date, date]:
         date.fromisoformat(settings.semester_start),
         date.fromisoformat(settings.semester_end),
     )
+
+
+def _dates_basis() -> str:
+    """Отпечаток правил расчёта дат: границы семестра и версия алгоритма.
+
+    Хранится у источника и сверяется на каждом импорте: пока он тот же, даты
+    в базе и даты из нового разбора считались одинаково, и разницу между ними
+    можно показывать людям.
+    """
+    start, end = _semester_bounds()
+    return f"{start.isoformat()}|{end.isoformat()}|{DATES_ALGO_VERSION}"
 
 
 def normalize_url(url: str) -> str:
@@ -110,6 +135,43 @@ async def download_xls(url: str, etag: str = "", last_modified: str = "") -> Dow
     return Download(path, filename, new_etag, new_modified)
 
 
+def _record_changes(
+    session: AsyncSession,
+    groups: dict[str, Group],
+    before: dict[int, list[changes_svc.LessonSig]],
+    after: dict[int, list[changes_svc.LessonSig]],
+    *,
+    with_dates: bool,
+) -> None:
+    """Складывает разницу по каждой группе в schedule_changes.
+
+    Группы, которых в базе ещё не было, пропускаем: их «изменение» — это весь
+    файл целиком, и рассылать такое некому и незачем.
+    """
+    for group in groups.values():
+        was = before.get(group.id, [])
+        if not was:
+            continue
+        now = after.get(group.id, [])
+        diff = changes_svc.compare(was, now, with_dates=with_dates)
+        if not diff:
+            continue
+        if changes_svc.is_mass_date_shift(diff, len(now)):
+            # даты переехали у половины группы разом — это не учебный отдел
+            log.warning(
+                "Группа %s: даты сдвинулись у %s пар из %s, уведомление не шлём",
+                group.name, len(diff), len(now),
+            )
+            continue
+        session.add(
+            ScheduleChange(
+                group_id=group.id,
+                summary=changes_svc.summarize(group.name, diff),
+                count=len(diff),
+            )
+        )
+
+
 async def save_schedule(
     session: AsyncSession,
     parsed: ParsedSchedule,
@@ -133,6 +195,14 @@ async def save_schedule(
     course = course or parsed.course
     sem_start, sem_end = _semester_bounds()
 
+    # Даты сравниваем, только если правила их расчёта с прошлого импорта не
+    # менялись: иначе разница между старыми и новыми — наша собственная.
+    source_row = await session.get(ScheduleSource, source_id) if source_id else None
+    basis = _dates_basis()
+    compare_dates = source_row is not None and source_row.date_basis == basis
+    if source_row is not None:
+        source_row.date_basis = basis
+
     groups: dict[str, Group] = {}
     for name in parsed.groups:
         group = await session.scalar(
@@ -152,6 +222,9 @@ async def save_schedule(
     # явно — не полагаемся на ON DELETE CASCADE, чтобы не зависеть от того,
     # включена ли в БД проверка внешних ключей.
     group_ids = [g.id for g in groups.values()]
+    # Снимок старых пар: после удаления сравнивать будет не с чем, а разница
+    # нужна — из неё собирается уведомление «расписание изменилось».
+    before = await changes_svc.snapshot(session, group_ids)
     if group_ids:
         old_lessons = select(Lesson.id).where(Lesson.group_id.in_(group_ids))
         await session.execute(
@@ -160,10 +233,14 @@ async def save_schedule(
         await session.execute(delete(Lesson).where(Lesson.group_id.in_(group_ids)))
 
     dates_count = 0
+    after: dict[int, list[changes_svc.LessonSig]] = defaultdict(list)
     for item in parsed.lessons:
         group = groups.get(item.group)
         if group is None:
             continue
+        origin, days = resolve_dates(
+            item.raw_note, item.weekday, item.week, sem_start, sem_end, item.block_dates
+        )
         lesson = Lesson(
             group_id=group.id,
             week=item.week,
@@ -178,13 +255,15 @@ async def save_schedule(
             room=item.room,
             lesson_type=LessonType(item.lesson_type),
             raw_note=item.raw_note,
+            date_origin=origin,
         )
         session.add(lesson)
-        for day in lesson_dates(
-            item.raw_note, item.weekday, item.week, sem_start, sem_end, item.block_dates
-        ):
+        after[group.id].append(changes_svc.from_lesson(lesson, days))
+        for day in days:
             lesson.dates.append(LessonDate(on_date=day))
             dates_count += 1
+
+    _record_changes(session, groups, before, after, with_dates=compare_dates)
 
     session.add(
         ImportLog(

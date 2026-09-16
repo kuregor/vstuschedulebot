@@ -19,6 +19,10 @@ LATE_COLUMNS = [
     "REFERENCES schedule_sources(id) ON DELETE SET NULL",
     "ALTER TABLE schedule_sources ADD COLUMN IF NOT EXISTS etag VARCHAR(128) DEFAULT ''",
     "ALTER TABLE schedule_sources ADD COLUMN IF NOT EXISTS last_modified VARCHAR(64) DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS notify BOOLEAN DEFAULT TRUE NOT NULL",
+    "ALTER TABLE lessons ADD COLUMN IF NOT EXISTS date_origin VARCHAR(8) "
+    "DEFAULT 'calc' NOT NULL",
+    "ALTER TABLE schedule_sources ADD COLUMN IF NOT EXISTS date_basis VARCHAR(64) DEFAULT ''",
 ]
 
 
