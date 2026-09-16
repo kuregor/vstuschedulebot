@@ -8,12 +8,12 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.models import Lesson, LessonDate, LessonNote
+from ..db.models import Group, Lesson, LessonDate, LessonNote
 
 # Длиннее в карточку пары всё равно не влезет, а в базе такие тексты копятся.
 MAX_TEXT = 500
@@ -68,54 +68,135 @@ async def list_notes(
                 "lesson_id": lesson_id,
                 "date": note.on_date.isoformat(),
                 "text": note.text,
+                # «2026-09-27T09:00» — местное время, в нём же его и выбирали.
+                # В базе момент лежит с часовым поясом и читается в UTC,
+                # поэтому переводим обратно в пояс бота, а не печатаем как есть.
+                "remind": note.remind_at.astimezone().strftime("%Y-%m-%dT%H:%M")
+                if note.remind_at
+                else "",
             }
         )
     return out
 
 
-async def set_note(
-    session: AsyncSession,
-    telegram_id: int,
-    lesson_id: int,
-    on_date: date,
-    text: str,
-) -> bool:
-    """Пишет заметку к паре на дату; пустой текст удаляет её. -> удалось ли.
+async def _place(
+    session: AsyncSession, telegram_id: int, lesson_id: int, on_date: date
+) -> dict | None:
+    """Ключ заметки по паре и дате; None — такой пары в этот день нет.
 
-    Дата проверяется по самой паре: писать заметку на день, когда занятия
-    нет, незачем — она всё равно никогда не покажется.
+    Дату проверяем по самой паре: заметка на день без занятия никогда не
+    показалась бы, а напоминание пришло бы в пустоту.
     """
     lesson = await session.get(Lesson, lesson_id)
     if lesson is None:
-        return False
+        return None
     known = await session.scalar(
         select(LessonDate.id).where(
             LessonDate.lesson_id == lesson_id, LessonDate.on_date == on_date
         )
     )
     if known is None:
-        return False
-
-    key = dict(
+        return None
+    return dict(
         telegram_id=telegram_id,
         group_id=lesson.group_id,
         on_date=on_date,
         slot_from=lesson.slot_from,
         subject_key=fold_subject(lesson.subject),
     )
-    text = (text or "").strip()[:MAX_TEXT]
 
-    if not text:
-        await session.execute(
-            delete(LessonNote).filter_by(**key)
-        )
-        await session.commit()
-        return True
+
+async def _drop_if_empty(session: AsyncSession, note: LessonNote) -> None:
+    """Строка без текста и без напоминания в базе не нужна."""
+    if not note.text and note.remind_at is None:
+        await session.delete(note)
+
+
+async def set_text(
+    session: AsyncSession,
+    telegram_id: int,
+    lesson_id: int,
+    on_date: date,
+    text: str,
+) -> bool:
+    """Пишет текст заметки; пустой стирает её, не трогая напоминание."""
+    key = await _place(session, telegram_id, lesson_id, on_date)
+    if key is None:
+        return False
+
+    note = await session.scalar(select(LessonNote).filter_by(**key))
+    text = (text or "").strip()[:MAX_TEXT]
+    if note is None:
+        if text:
+            session.add(LessonNote(**key, text=text))
+    else:
+        note.text = text
+        if not text:
+            # Заметку убрали — напоминать больше не о чем, снимаем и его.
+            note.remind_at = None
+            note.remind_sent = False
+        await _drop_if_empty(session, note)
+    await session.commit()
+    return True
+
+
+async def set_reminder(
+    session: AsyncSession,
+    telegram_id: int,
+    lesson_id: int,
+    on_date: date,
+    at: datetime | None,
+) -> bool:
+    """Ставит или снимает напоминание о заметке.
+
+    Новое время снимает отметку об отправке: человек перенёс напоминание, и
+    оно должно прийти заново.
+    """
+    key = await _place(session, telegram_id, lesson_id, on_date)
+    if key is None:
+        return False
 
     note = await session.scalar(select(LessonNote).filter_by(**key))
     if note is None:
-        session.add(LessonNote(**key, text=text))
+        if at is None:
+            return True
+        session.add(LessonNote(**key, text="", remind_at=at, remind_sent=False))
     else:
-        note.text = text
+        note.remind_at = at
+        note.remind_sent = False
+        await _drop_if_empty(session, note)
     await session.commit()
     return True
+
+
+async def due(session: AsyncSession, now: datetime) -> list[LessonNote]:
+    """Напоминания, которым пора уйти."""
+    stmt = (
+        select(LessonNote)
+        .where(
+            LessonNote.remind_at.is_not(None),
+            LessonNote.remind_sent.is_(False),
+            LessonNote.remind_at <= now,
+        )
+        .order_by(LessonNote.remind_at)
+        .limit(50)
+    )
+    return list(await session.scalars(stmt))
+
+
+async def lesson_of(session: AsyncSession, note: LessonNote) -> tuple[Group, Lesson] | None:
+    """Группа и пара, к которым привязана заметка, — для текста напоминания."""
+    stmt = (
+        select(Group, Lesson)
+        .join(Lesson, Lesson.group_id == Group.id)
+        .join(LessonDate, LessonDate.lesson_id == Lesson.id)
+        .where(
+            Lesson.group_id == note.group_id,
+            Lesson.slot_from == note.slot_from,
+            LessonDate.on_date == note.on_date,
+        )
+    )
+    for group, lesson in await session.execute(stmt):
+        if fold_subject(lesson.subject) == note.subject_key:
+            return group, lesson
+    return None

@@ -23,6 +23,9 @@ LATE_COLUMNS = [
     "ALTER TABLE lessons ADD COLUMN IF NOT EXISTS date_origin VARCHAR(8) "
     "DEFAULT 'calc' NOT NULL",
     "ALTER TABLE schedule_sources ADD COLUMN IF NOT EXISTS date_basis VARCHAR(64) DEFAULT ''",
+    "ALTER TABLE lesson_notes ADD COLUMN IF NOT EXISTS remind_at TIMESTAMPTZ",
+    "ALTER TABLE lesson_notes ADD COLUMN IF NOT EXISTS remind_sent BOOLEAN "
+    "DEFAULT FALSE NOT NULL",
 ]
 
 

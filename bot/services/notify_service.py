@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -18,9 +19,11 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.models import ScheduleChange, User
+from ..db.models import Group, Lesson, LessonNote, ScheduleChange, User
 from ..db.session import SessionLocal
+from ..utils.formatting import DOW_FULL
 from ..webapp import public_url
+from . import notes_service
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +35,9 @@ SEND_PAUSE_SECONDS = 0.05
 # Старое изменение уже не новость: в приложении его давно видно, а сообщение
 # «аудитория 302 → 415» про позапрошлую неделю — просто шум.
 STALE_AFTER = timedelta(days=3)
+# Напоминание, опоздавшее на полдня (бот лежал), уже не помогает: пара либо
+# прошла, либо вот-вот начнётся, и человек всё равно смотрит расписание сам.
+REMINDER_STALE_AFTER = timedelta(hours=12)
 
 
 def _keyboard() -> InlineKeyboardMarkup | None:
@@ -106,4 +112,68 @@ async def send_pending(bot: Bot) -> int:
 
     if sent:
         log.info("Разослано уведомлений об изменениях: %s", sent)
+    return sent
+
+
+def _reminder_text(group: Group, lesson: Lesson, note: LessonNote) -> str:
+    """Напоминание о заметке: когда пара, что за пара и что записано."""
+    when = f"{DOW_FULL[lesson.weekday - 1].lower()}, {note.on_date:%d.%m}"
+    place = f"{when} · {lesson.start_time}"
+    if lesson.room:
+        place += f" · ауд. {html.escape(lesson.room)}"
+    lines = [
+        f"⏰ Напоминание — <b>{html.escape(group.name)}</b>",
+        "",
+        f"<b>{html.escape(lesson.subject)}</b>",
+        place,
+    ]
+    if note.text:
+        lines += ["", html.escape(note.text)]
+    return "\n".join(lines)
+
+
+async def send_reminders(bot: Bot) -> int:
+    """Отправляет напоминания, которым подошло время -> сколько ушло.
+
+    Отметка об отправке ставится в любом случае: если пары в расписании уже
+    нет или человек заблокировал бота, напоминание не должно возвращаться на
+    каждом круге.
+    """
+    now = datetime.now().astimezone()
+    sent = 0
+    async with SessionLocal() as session:
+        pending = await notes_service.due(session, now)
+        if not pending:
+            return 0
+
+        keyboard = _keyboard()
+        for note in pending:
+            note.remind_sent = True
+            planned = note.remind_at
+            if planned is not None and planned.tzinfo is None:
+                planned = planned.replace(tzinfo=timezone.utc)
+            if planned is not None and now - planned > REMINDER_STALE_AFTER:
+                log.info("Напоминание %s опоздало, не шлём", note.id)
+                continue
+
+            place = await notes_service.lesson_of(session, note)
+            if place is None:  # пару убрали из расписания — напоминать не о чем
+                log.info("Напоминание %s: пары уже нет в расписании", note.id)
+                continue
+
+            group, lesson = place
+            try:
+                await bot.send_message(
+                    note.telegram_id,
+                    _reminder_text(group, lesson, note),
+                    reply_markup=keyboard,
+                )
+                sent += 1
+            except TelegramAPIError as exc:
+                log.warning("Напоминание для %s не ушло: %s", note.telegram_id, exc)
+            await asyncio.sleep(SEND_PAUSE_SECONDS)
+        await session.commit()
+
+    if sent:
+        log.info("Отправлено напоминаний: %s", sent)
     return sent

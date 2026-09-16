@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from aiohttp import web
@@ -211,9 +211,42 @@ async def handle_set_note(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "saved": False})
 
     async with SessionLocal() as session:
-        saved = await notes_svc.set_note(
+        saved = await notes_svc.set_text(
             session, user_id, lesson_id, on_date, str(body.get("text", ""))
         )
+    if not saved:
+        raise web.HTTPNotFound(text="Такой пары в этот день в расписании нет")
+    return web.json_response({"ok": True, "saved": True})
+
+
+async def handle_set_reminder(request: web.Request) -> web.Response:
+    """Напоминание о заметке: «2026-09-27T09:00» ставит, пустое снимает.
+
+    Время приходит местное, без часового пояса, — таким его и выбирали в
+    приложении. Пояс приписываем свой: бот живёт в Europe/Moscow, в нём же
+    идут и занятия.
+    """
+    user_id = _user_id(request)
+    body = await request.json()
+    try:
+        lesson_id = int(body.get("lesson_id", 0))
+        on_date = date.fromisoformat(str(body.get("date", "")))
+    except (TypeError, ValueError) as exc:
+        raise web.HTTPBadRequest(text="Не указана пара или дата заметки") from exc
+
+    raw = str(body.get("at", "") or "")
+    at = None
+    if raw:
+        try:
+            at = datetime.fromisoformat(raw).astimezone()
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="Неверное время напоминания") from exc
+
+    if user_id is None:
+        return web.json_response({"ok": True, "saved": False})
+
+    async with SessionLocal() as session:
+        saved = await notes_svc.set_reminder(session, user_id, lesson_id, on_date, at)
     if not saved:
         raise web.HTTPNotFound(text="Такой пары в этот день в расписании нет")
     return web.json_response({"ok": True, "saved": True})
@@ -304,6 +337,7 @@ def create_app() -> web.Application:
             web.post("/api/notify", handle_notify),
             web.get("/api/notes", handle_notes),
             web.post("/api/note", handle_set_note),
+            web.post("/api/reminder", handle_set_reminder),
             web.static("/static", STATIC_DIR),
         ]
     )

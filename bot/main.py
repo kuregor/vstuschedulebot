@@ -31,9 +31,9 @@ from .webapp.server import start_webapp
 POLL_PUBLIC_URL_SECONDS = 5
 # Пауза между чатами: Telegram не любит очередь запросов без передышки
 MENU_BUTTON_PAUSE_SECONDS = 0.05
-# Как часто заглядывать в очередь уведомлений об изменениях расписания.
-# Сами изменения появляются редко, но ждать их в очереди незачем: проверка —
-# один запрос по индексу.
+# Как часто заглядывать в очередь сообщений — изменений расписания и
+# напоминаний. Появляются они редко, но ждать их в очереди незачем: проверка —
+# два запроса по индексу.
 NOTIFY_POLL_SECONDS = 30
 
 logging.basicConfig(
@@ -130,17 +130,20 @@ async def _keep_schedules_fresh() -> None:
         await asyncio.sleep(settings.refresh_hours * 3600)
 
 
-async def _deliver_changes(bot: Bot) -> None:
-    """Разносит уведомления о правках расписания, которые нашёл импорт.
+async def _deliver_messages(bot: Bot) -> None:
+    """Разносит уведомления о правках расписания и напоминания о заметках.
 
     Отдельной задачей, а не сразу после разбора файла: обновление идёт пачкой
     по всему каталогу сайта, и рассылка посреди него растянула бы загрузку.
+    Напоминания живут здесь же — им нужен тот же круг и тот же бот, а точность
+    в полминуты для «напомнить за день до пары» с запасом достаточна.
     """
     while True:
         try:
             await notify_service.send_pending(bot)
+            await notify_service.send_reminders(bot)
         except Exception:  # сеть или лимиты Telegram — повторим на следующем круге
-            log.exception("Рассылка уведомлений не удалась")
+            log.exception("Рассылка сообщений не удалась")
         await asyncio.sleep(NOTIFY_POLL_SECONDS)
 
 
@@ -160,7 +163,7 @@ async def main() -> None:
     await _set_commands(bot)
     menu_keeper = asyncio.create_task(_keep_menu_button(bot))
     refresher = asyncio.create_task(_keep_schedules_fresh())
-    notifier = asyncio.create_task(_deliver_changes(bot))
+    notifier = asyncio.create_task(_deliver_messages(bot))
 
     # Веб-сервер Mini App живёт в том же процессе, что и бот.
     runner = await start_webapp()

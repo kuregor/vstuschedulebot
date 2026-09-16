@@ -146,13 +146,16 @@ function writeNotes(notes) {
 }
 
 const noteKey = (lessonId, iso) => `${lessonId}|${iso}`;
-const noteFor = (lessonId, iso) => state.notes[noteKey(lessonId, iso)] || "";
+const noteAt = (lessonId, iso) => state.notes[noteKey(lessonId, iso)] || null;
+const noteFor = (lessonId, iso) => noteAt(lessonId, iso)?.text || "";
+const remindFor = (lessonId, iso) => noteAt(lessonId, iso)?.remind || "";
 
-/* Заметки одной пары по её датам, в порядке занятий. */
+/* Заметки одной пары по её датам, в порядке занятий. Пара с одним лишь
+   напоминанием тоже в списке: человек его поставил, значит должен видеть. */
 function notesOfLesson(lesson) {
   return lesson.dates
-    .map((iso) => ({ iso, text: noteFor(lesson.id, iso) }))
-    .filter((item) => item.text);
+    .map((iso) => Object.assign({ iso }, noteAt(lesson.id, iso)))
+    .filter((item) => item.text || item.remind);
 }
 
 async function loadNotes(groupId = "") {
@@ -160,41 +163,53 @@ async function loadNotes(groupId = "") {
   const data = await api(`/api/notes${query}`);
   const notes = {};
   (data.notes || []).forEach((item) => {
-    notes[noteKey(item.lesson_id, item.date)] = item.text;
+    notes[noteKey(item.lesson_id, item.date)] = {
+      text: item.text || "",
+      remind: item.remind || "",
+    };
   });
   state.notes = notes;
   writeNotes(notes);
 }
 
-/* Сохранение заметки: пустой текст сервер понимает как «удалить».
+/* Запись заметки или напоминания. Пустое значение сервер понимает как
+   «удалить», а строка без текста и без напоминания у него просто исчезает.
 
-   На экране изменение показываем сразу, не дожидаясь ответа: человек уже
+   На экране правка показывается сразу, не дожидаясь ответа: человек уже
    закрыл клавиатуру, и ждать сеть ему незачем. Если запрос не дошёл — правим
    обратно и говорим об этом. */
-async function saveNote(lessonId, iso, text) {
+async function saveNotePart(lessonId, iso, field, value, path) {
   const key = noteKey(lessonId, iso);
-  const before = state.notes[key] || "";
-  const clean = text.trim();
-  if (clean === before) return;
+  const before = Object.assign({ text: "", remind: "" }, state.notes[key]);
+  const clean = (value || "").trim();
+  if (clean === before[field]) return;
 
-  if (clean) state.notes[key] = clean;
+  const after = Object.assign({}, before, { [field]: clean });
+  // Удалили текст — уходит и напоминание: сервер делает то же самое.
+  if (field === "text" && !clean) after.remind = "";
+  if (after.text || after.remind) state.notes[key] = after;
   else delete state.notes[key];
   writeNotes(state.notes);
   render();
 
+  const body = { lesson_id: lessonId, date: iso };
+  body[field === "text" ? "text" : "at"] = clean;
   try {
-    await api("/api/note", {
-      method: "POST",
-      body: JSON.stringify({ lesson_id: lessonId, date: iso, text: clean }),
-    });
+    await api(path, { method: "POST", body: JSON.stringify(body) });
   } catch (err) {
-    if (before) state.notes[key] = before;
+    if (before.text || before.remind) state.notes[key] = before;
     else delete state.notes[key];
     writeNotes(state.notes);
     render();
-    showToast("Заметка не сохранилась: " + explainFailure(err));
+    showToast((field === "text" ? "Заметка" : "Напоминание")
+      + " не сохранилось: " + explainFailure(err));
   }
 }
+
+const saveNote = (lessonId, iso, text) =>
+  saveNotePart(lessonId, iso, "text", text, "/api/note");
+const saveRemind = (lessonId, iso, at) =>
+  saveNotePart(lessonId, iso, "remind", at, "/api/reminder");
 
 async function api(path, options = {}) {
   let lastError;
@@ -382,14 +397,26 @@ function groupByTime(lessons) {
 
 /* Плашка заметки — из макета: тонкая полоса слева, дата мелким моноширинным
    и сам текст. В шторке дня дата не нужна: она там и так в заголовке. */
-function noteLine(dateLabel, text) {
+function noteLine(dateLabel, text, remind) {
   const row = el("div", "note");
   row.append(el("span", "note-bar"));
   const body = el("div", "note-body");
   if (dateLabel) body.append(el("div", "note-date", dateLabel));
-  body.append(el("div", "note-text", text));
+  if (text) body.append(el("div", "note-text", text));
+  if (remind) {
+    const bell = el("div", "note-rem");
+    bell.append(el("span", "dot"), el("span", "when", remindLabel(remind)));
+    body.append(bell);
+  }
   row.append(body);
   return row;
+}
+
+/* «2026-09-27T09:00» -> «27.09, 09:00» — как подписано в макете. */
+function remindLabel(at) {
+  if (!at) return "выкл";
+  const [day, time] = at.split("T");
+  return `${shortDate(day)}, ${time.slice(0, 5)}`;
 }
 
 /* Короткое сообщение внизу экрана: сейчас — единственное место, где человеку
@@ -429,7 +456,8 @@ function lessonNode(lesson) {
   const notes = notesOfLesson(lesson);
   if (notes.length) {
     const box = el("div", "notes");
-    notes.forEach((item) => box.append(noteLine(shortDate(item.iso), item.text)));
+    notes.forEach((item) =>
+      box.append(noteLine(shortDate(item.iso), item.text, item.remind)));
     main.append(box);
   }
 
@@ -654,7 +682,7 @@ function datesAndNote(lesson) {
     const iso = state.sheetDate;
     const text = noteFor(lesson.id, iso);
 
-    if (!text && !editing) {
+    if (!text && !editing && !remindFor(lesson.id, iso)) {
       const add = el("button", "note-add");
       add.append(el("span", "plus", "+"), el("span", "label", "Заметка"),
         el("span", "when", shortDate(iso)));
@@ -678,6 +706,16 @@ function datesAndNote(lesson) {
     }
     editor.append(head);
 
+    const bell = el("button", "rem-row");
+    const at = remindFor(lesson.id, iso);
+    const dot = el("span", `rem-dot${at ? " on" : ""}`);
+    const when = el("span", `rem-when${at ? " on" : ""}`, remindLabel(at));
+    bell.append(dot, el("span", "rem-label", "Напоминание"), when, el("span", "chev"));
+    bell.onclick = () => {
+      haptic();
+      openRemindSheet(lesson, iso, () => { paintChips(); paintEditor(); });
+    };
+
     if (editing) {
       const input = el("textarea", "note-input");
       input.value = text;
@@ -696,16 +734,217 @@ function datesAndNote(lesson) {
       editor.append(input);
       setTimeout(() => input.focus(), 60);
     } else {
-      const view = el("button", "note-view", text);
+      const view = el("button", "note-view", text || "Заметка пустая — тап, чтобы написать");
+      if (!text) view.classList.add("empty");
       view.onclick = () => { haptic(); editing = true; paintEditor(); };
       editor.append(view);
     }
+    editor.append(bell);
   };
 
   paintChips();
   paintEditor();
   box.append(cap, chips, editor);
   return box;
+}
+
+/* ── напоминание о заметке ───────────────────────────────────────── */
+
+/* Шторка напоминания — второй слой поверх шторки пары, как в макете.
+   Собственный корень: обычная шторка в приложении одна, и открыть поверх неё
+   вторую иначе нельзя.
+
+   Время выбирается так же, как в макете: сначала пресеты «за сколько до
+   пары», а если нужно иначе — раскрываются календарь и колёса часов с
+   минутами. На сервер значение уходит при закрытии: крутя колесо, человек
+   перебирает десяток значений, и слать каждое незачем. */
+
+const REM_PRESETS = [[0, "В день пары"], [1, "За 1 день"], [3, "За 3 дня"], [7, "За неделю"]];
+const MONTHS_NOM = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+  "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
+
+const dayShift = (isoDate, days) => {
+  const at = new Date(isoDate + "T00:00:00Z");
+  at.setUTCDate(at.getUTCDate() - days);
+  return at.toISOString().slice(0, 10);
+};
+const daysBetween = (fromIso, toIso) =>
+  Math.round((Date.parse(toIso + "T00:00:00Z") - Date.parse(fromIso + "T00:00:00Z")) / 864e5);
+
+/* «за 1 день», «в день пары», «после пары» — подпись к выбранному сдвигу. */
+function shiftWord(days) {
+  if (days < 0) return "после пары";
+  if (days === 0) return "в день пары";
+  if (days === 1) return "за 1 день";
+  return `за ${days} ${days < 5 ? "дня" : "дней"}`;
+}
+
+function openRemindSheet(lesson, isoDate, done) {
+  const current = remindFor(lesson.id, isoDate);
+  let day = current ? current.split("T")[0] : dayShift(isoDate, 1);
+  let time = current ? current.slice(11, 16) : "09:00";
+  let pane = null;                        // раскрытая панель: date | time
+  let month = day.slice(0, 7);            // месяц календаря
+
+  const root = el("div", "sheet-root layer");
+  document.body.append(root);
+  const scrim = el("div", "scrim");
+  const sheet = el("div", "sheet rem-sheet");
+  root.append(scrim, sheet);
+
+  const finish = (at) => {
+    root.remove();
+    saveRemind(lesson.id, isoDate, at);
+    done();
+  };
+  scrim.onclick = () => finish(day + "T" + time);
+
+  /* Месяц целиком: по нему выбирают день, не попавший в пресеты. */
+  function calendarPane() {
+    const box = el("div", "rem-pane");
+    const [year, mon] = month.split("-").map(Number);
+
+    const head = el("div", "rem-cal-head");
+    head.append(el("span", "name", MONTHS_NOM[mon - 1]), el("span", "year mono", String(year)));
+    const step = (delta) => {
+      month = new Date(Date.UTC(year, mon - 1 + delta, 1)).toISOString().slice(0, 7);
+      draw();
+    };
+    const prev = el("button", "rem-arrow prev");
+    prev.onclick = () => { haptic(); step(-1); };
+    const next = el("button", "rem-arrow next");
+    next.onclick = () => { haptic(); step(1); };
+    head.append(prev, next);
+    box.append(head);
+
+    const dows = el("div", "rem-dow");
+    DOW.forEach((label, i) => dows.append(el("div", i > 4 ? "weekend" : null, label)));
+    box.append(dows);
+
+    const cells = el("div", "rem-cells");
+    const lead = (new Date(Date.UTC(year, mon - 1, 1)).getUTCDay() + 6) % 7;
+    for (let i = 0; i < lead; i++) cells.append(el("div", "rem-cell pad"));
+    const total = new Date(Date.UTC(year, mon, 0)).getUTCDate();
+    for (let d = 1; d <= total; d++) {
+      const key = iso(year, mon, d);
+      // не «lesson»: этот класс занят карточкой пары и сделал бы ячейку flex
+      const marks = (key === day ? " on" : "") + (key === isoDate ? " lesson-day" : "");
+      const cell = el("button", "rem-cell" + marks, String(d));
+      cell.onclick = () => { haptic(); day = key; draw(); };
+      cells.append(cell);
+    }
+    box.append(cells);
+
+    const jump = el("div", "rem-jump");
+    const toLesson = el("button", null, "День пары");
+    toLesson.onclick = () => { haptic(); day = isoDate; month = isoDate.slice(0, 7); draw(); };
+    const toToday = el("button", "accent", "Сегодня");
+    toToday.onclick = () => {
+      haptic();
+      day = state.data?.semester?.today || day;
+      month = day.slice(0, 7);
+      draw();
+    };
+    jump.append(toLesson, toToday);
+    box.append(jump);
+    return box;
+  }
+
+  /* Часы и минуты колёсами: тап по значению подводит его в середину. */
+  function timePane() {
+    const box = el("div", "rem-pane rem-time");
+    box.append(el("div", "rem-time-band"));
+    const hh = Number(time.slice(0, 2));
+    const mm = Number(time.slice(3, 5));
+
+    const wheel = (values, current, onPick) => {
+      const frame = el("div", "wheel");
+      const strip = el("div", "wheel-strip");
+      const at = values.indexOf(current);
+      strip.style.transform = `translateY(${54 - at * 36}px)`;
+      values.forEach((value, index) => {
+        const dist = Math.abs(index - at);
+        const item = el("button", `wheel-item${dist === 0 ? " on" : ""}`,
+          String(value).padStart(2, "0"));
+        item.style.opacity = dist === 0 ? 1 : dist === 1 ? 0.75 : 0.4;
+        item.onclick = () => { haptic(); onPick(value); };
+        strip.append(item);
+      });
+      frame.append(strip);
+      return frame;
+    };
+
+    const hours = Array.from({ length: 24 }, (_, h) => h);
+    const mins = Array.from({ length: 12 }, (_, i) => i * 5);
+    box.append(
+      wheel(hours, hh, (h) => {
+        time = String(h).padStart(2, "0") + time.slice(2);
+        draw();
+      }),
+      el("div", "wheel-colon", ":"),
+      wheel(mins, mm - (mm % 5), (m) => {
+        time = time.slice(0, 3) + String(m).padStart(2, "0");
+        draw();
+      }),
+    );
+    return box;
+  }
+
+  function draw() {
+    sheet.replaceChildren(el("div", "grabber"));
+
+    const head = el("div", "rem-head");
+    head.append(el("div", "title", "Напоминание"),
+      el("div", "sub", `${lesson.title} · ${shortDate(isoDate)}, ${lesson.start}`));
+    sheet.append(head);
+
+    const presets = el("div", "rem-presets");
+    REM_PRESETS.forEach((preset) => {
+      const on = day === dayShift(isoDate, preset[0]);
+      const btn = el("button", `rem-preset${on ? " on" : ""}`, preset[1]);
+      btn.onclick = () => {
+        haptic();
+        day = dayShift(isoDate, preset[0]);
+        month = day.slice(0, 7);
+        draw();
+      };
+      presets.append(btn);
+    });
+    sheet.append(presets);
+
+    const card = el("div", "rem-card");
+    const dateRow = el("button", "rem-pick");
+    dateRow.append(el("span", "label", "Дата"),
+      el("span", `chip mono${pane === "date" ? " on" : ""}`, shortDate(day)));
+    dateRow.onclick = () => { haptic(); pane = pane === "date" ? null : "date"; draw(); };
+    card.append(dateRow);
+    if (pane === "date") card.append(calendarPane());
+
+    const timeRow = el("button", "rem-pick");
+    timeRow.append(el("span", "label", "Время"),
+      el("span", `chip mono${pane === "time" ? " on" : ""}`, time));
+    timeRow.onclick = () => { haptic(); pane = pane === "time" ? null : "time"; draw(); };
+    card.append(timeRow);
+    if (pane === "time") card.append(timePane());
+    sheet.append(card);
+
+    const sum = el("div", "rem-sum");
+    sum.append(el("span", "dot"), el("span", null,
+      `Напомним ${shortDate(day)} в ${time} · ${shiftWord(daysBetween(day, isoDate))}`));
+    sheet.append(sum);
+
+    const ok = el("button", "close-btn", "Готово");
+    ok.onclick = () => { haptic(); finish(day + "T" + time); };
+    sheet.append(ok);
+
+    if (current) {
+      const drop = el("button", "rem-delete", "Удалить напоминание");
+      drop.onclick = () => { haptic(); finish(""); };
+      sheet.append(drop);
+    }
+  }
+
+  draw();
 }
 
 function openLessonSheet(lesson) {
@@ -787,8 +1026,8 @@ function openDaySheet(isoDate, ids) {
       if (lesson.teacher) meta.append(el("span", "lesson-teacher", lesson.teacher));
       main.append(meta);
 
-      const note = noteFor(lesson.id, isoDate);
-      if (note) main.append(noteLine("", note));
+      const note = noteAt(lesson.id, isoDate);
+      if (note) main.append(noteLine("", note.text, note.remind));
 
       row.append(time, bar, main);
       list.append(row);

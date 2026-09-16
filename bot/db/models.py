@@ -240,6 +240,10 @@ class LessonNote(Base):
     # название предмета в свёрнутом виде: регистр и лишние пробелы не в счёт
     subject_key: Mapped[str] = mapped_column(String(200))
     text: Mapped[str] = mapped_column(Text, default="")
+    # Когда напомнить об этой заметке и ушло ли напоминание. Строка живёт,
+    # пока есть хоть что-то одно: текст или неотправленное напоминание.
+    remind_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    remind_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

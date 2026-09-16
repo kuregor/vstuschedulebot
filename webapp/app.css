@@ -399,3 +399,128 @@ body::-webkit-scrollbar,
   font-size: 12px; font-weight: 600; line-height: 1.35; text-align: center;
   animation: fade 0.18s ease;
 }
+
+/* ── напоминания о заметках ──────────────────────────────────────── */
+
+/* Строка напоминания внутри плашки заметки. */
+.note-rem { display: flex; align-items: center; gap: 4px; }
+.note-rem .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: none; }
+.note-rem .when { font-family: 'JetBrains Mono', monospace; font-size: 9.5px; font-weight: 600; color: var(--accent); }
+.note-view.empty { color: rgba(23, 22, 26, 0.45); font-weight: 500; }
+
+/* Кнопка «Напоминание» под заметкой. */
+.rem-row {
+  display: flex; align-items: center; gap: 9px; width: 100%; margin-top: 7px;
+  border: 1px solid rgba(23, 22, 26, 0.09); background: var(--card); border-radius: 12px;
+  padding: 11px 12px; cursor: pointer; font-family: inherit; color: var(--ink);
+}
+.rem-row:active { background: rgba(23, 22, 26, 0.03); }
+.rem-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; border: 2px solid rgba(23, 22, 26, 0.25); }
+.rem-dot.on { border-color: var(--accent); background: var(--accent); }
+.rem-label { font-size: 12.5px; font-weight: 700; }
+.rem-when { margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600; color: rgba(23, 22, 26, 0.45); }
+.rem-when.on { color: var(--accent); }
+.rem-row .chev {
+  width: 6px; height: 6px; flex: none; transform: rotate(45deg);
+  border-top: 2px solid rgba(23, 22, 26, 0.3); border-right: 2px solid rgba(23, 22, 26, 0.3);
+}
+
+/* Сама шторка напоминания — вторым слоем поверх шторки пары. */
+.sheet-root.layer { z-index: 70; }
+.rem-sheet { background: var(--chip); padding: 10px 16px calc(30px + var(--safe-bottom)); }
+.rem-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 14px; }
+.rem-head .title { font-size: 19px; font-weight: 800; letter-spacing: -0.3px; }
+.rem-head .sub { font-size: 11.5px; font-weight: 600; color: rgba(23, 22, 26, 0.55); text-wrap: pretty; }
+
+.rem-presets { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.rem-preset {
+  border: 1px solid rgba(23, 22, 26, 0.08); background: var(--chip); cursor: pointer;
+  padding: 11px 0; border-radius: 12px; font-family: inherit;
+  font-size: 12.5px; font-weight: 700; color: rgba(23, 22, 26, 0.7);
+}
+.rem-preset.on { background: oklch(0.97 0.02 155); border-color: var(--accent); color: var(--ink); }
+.rem-preset:active { filter: brightness(0.97); }
+
+.rem-card {
+  margin-top: 10px; background: var(--card); border: 1px solid rgba(23, 22, 26, 0.08);
+  border-radius: 14px; display: flex; flex-direction: column;
+}
+.rem-pick {
+  display: flex; align-items: center; gap: 10px; padding: 11px 13px;
+  border: 0; background: transparent; cursor: pointer; font-family: inherit; color: var(--ink);
+}
+.rem-pick + .rem-pick, .rem-pane + .rem-pick { border-top: 1px solid rgba(23, 22, 26, 0.07); }
+.rem-pick .label { font-size: 13.5px; font-weight: 700; }
+.rem-pick .chip {
+  margin-left: auto; border-radius: 9px; padding: 7px 10px;
+  font-size: 12px; font-weight: 700; background: var(--chip); color: var(--ink);
+}
+.rem-pick .chip.on { background: var(--accent); color: var(--card); }
+.rem-pane { padding: 2px 11px 13px; }
+
+.rem-cal-head { display: flex; align-items: center; gap: 6px; padding: 0 2px 8px; }
+.rem-cal-head .name { font-size: 14px; font-weight: 800; letter-spacing: -0.2px; }
+.rem-cal-head .year { font-size: 11px; font-weight: 600; color: rgba(23, 22, 26, 0.5); }
+.rem-arrow {
+  width: 28px; height: 28px; border: 0; background: var(--chip); border-radius: 8px;
+  cursor: pointer; position: relative; flex: none;
+}
+.rem-arrow.prev { margin-left: auto; }
+.rem-arrow::after {
+  content: ""; position: absolute; top: 10px; left: 10px; width: 7px; height: 7px;
+  border-left: 2px solid var(--accent); border-bottom: 2px solid var(--accent);
+  transform: rotate(45deg);
+}
+.rem-arrow.next::after { left: 8px; transform: rotate(-135deg); }
+.rem-arrow:active { filter: brightness(0.96); }
+
+.rem-dow, .rem-cells { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; }
+.rem-dow { padding-bottom: 4px; }
+.rem-dow div { text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 9.5px; font-weight: 700; color: rgba(23, 22, 26, 0.55); }
+.rem-dow div.weekend { color: rgba(23, 22, 26, 0.32); }
+.rem-cell {
+  aspect-ratio: 1; border: 0; border-radius: 9px; cursor: pointer; padding: 0;
+  background: transparent; color: rgba(23, 22, 26, 0.75);
+  font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500;
+}
+.rem-cell.pad { cursor: default; }
+.rem-cell.lesson-day { box-shadow: inset 0 0 0 1.5px rgba(61, 107, 87, 0.45); font-weight: 700; }
+.rem-cell.on { background: var(--ink); color: var(--card); font-weight: 700; }
+.rem-cell:active { filter: brightness(0.95); }
+
+.rem-jump { display: flex; gap: 6px; padding-top: 9px; }
+.rem-jump button {
+  flex: 1; border: 1px solid rgba(23, 22, 26, 0.1); background: var(--chip); cursor: pointer;
+  padding: 8px 0; border-radius: 10px; font-family: inherit;
+  font-size: 11.5px; font-weight: 700; color: var(--ink);
+}
+.rem-jump button.accent { color: var(--accent); }
+
+/* Колёса часов и минут: середина подсвечена, соседние значения бледнее. */
+.rem-time { display: flex; justify-content: center; align-items: center; gap: 4px; height: 150px; position: relative; box-sizing: border-box; }
+.rem-time-band {
+  position: absolute; left: 11px; right: 11px; top: 55px; height: 36px;
+  border-radius: 10px; background: rgba(61, 107, 87, 0.1); pointer-events: none;
+}
+.wheel { position: relative; height: 144px; width: 76px; overflow: hidden; }
+.wheel-strip {
+  position: absolute; left: 0; right: 0; top: 0; display: flex; flex-direction: column;
+  transition: transform 0.22s cubic-bezier(0.25, 0.9, 0.3, 1);
+}
+.wheel-item {
+  flex: none; height: 36px; border: 0; background: transparent; cursor: pointer; padding: 0;
+  font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 500;
+  color: rgba(23, 22, 26, 0.45);
+}
+.wheel-item.on { font-size: 18px; font-weight: 700; color: var(--ink); }
+.wheel-colon { font-family: 'JetBrains Mono', monospace; font-size: 17px; font-weight: 700; color: rgba(23, 22, 26, 0.3); padding-bottom: 2px; }
+
+.rem-sum { display: flex; align-items: center; gap: 7px; margin-top: 10px; padding: 0 3px; }
+.rem-sum .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+.rem-sum span:last-child { font-size: 11.5px; font-weight: 600; color: var(--accent); text-wrap: pretty; }
+
+.rem-delete {
+  width: 100%; margin-top: 8px; border: 0; background: transparent; cursor: pointer;
+  padding: 6px 0; font-family: inherit; font-size: 12px; font-weight: 700; color: var(--lab);
+}
+.rem-delete:active { opacity: 0.7; }
