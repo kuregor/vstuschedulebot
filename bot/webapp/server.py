@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from datetime import date, datetime
 from pathlib import Path
@@ -13,8 +14,18 @@ from ..db.session import SessionLocal
 from ..services import notes_service as notes_svc
 from ..services import schedule_service as svc
 from ..services import source_service as sources_svc
+from ..services import teacher_service as teacher_svc
 from . import public_url
-from .api import schedule_etag, schedule_json, settings_json, source_json
+from .api import (
+    schedule_etag,
+    schedule_json,
+    settings_json,
+    source_json,
+    teacher_etag,
+    teacher_json,
+    teachers_etag,
+    teachers_json,
+)
 from .auth import InitDataError, user_id_from_init_data
 
 log = logging.getLogger(__name__)
@@ -157,6 +168,65 @@ async def handle_schedule(request: web.Request) -> web.Response:
         await _remember_group(session, user_id, group_id, group.id)
 
     return web.json_response(payload, headers={"ETag": etag})
+
+
+def _dumps_utf8(payload) -> str:
+    """JSON с кириллицей как есть, а не \\uXXXX: справочник преподавателей из
+    одних имён и предметов, и с экранированием он весил вдвое с лишним больше."""
+    return json.dumps(payload, ensure_ascii=False)
+
+
+async def handle_teachers(request: web.Request) -> web.Response:
+    """Справочник преподавателей для шторки выбора.
+
+    Все преподаватели всех файлов — для поиска по фамилии, и отдельно те, кто
+    ведёт у группы человека: с них шторка открывается. Имена уже сведены к
+    одному виду (см. teacher_service), по ним же потом просят расписание.
+    """
+    user_id = _user_id(request)
+    async with SessionLocal() as session:
+        group_id = await _group_for(session, request, user_id)
+        # Справочник меняется только с перезаливом файлов: пока каталог тот
+        # же, отвечаем 304 и пары не читаем — как у /api/schedule.
+        etag = teachers_etag(group_id, await teacher_svc.catalog_stamp(session))
+        if request.headers.get("If-None-Match") == etag:
+            return web.Response(status=304, headers={"ETag": etag})
+        group = await svc.get_group(session, group_id) if group_id else None
+        names = await teacher_svc.all_names(session)
+        everyone = teacher_svc.summarize(await teacher_svc.directory_rows(session), names)
+        at_group = (
+            teacher_svc.summarize(await teacher_svc.directory_rows(session, group.id), names)
+            if group is not None
+            else {}
+        )
+    return web.json_response(
+        teachers_json(everyone, at_group, group, version=etag),
+        headers={"ETag": etag},
+        dumps=_dumps_utf8,
+    )
+
+
+async def handle_teacher(request: web.Request) -> web.Response:
+    """Расписание преподавателя по всем группам; при неизменившемся каталоге — 304.
+
+    Устроено как /api/schedule: версия считается по лёгкой строке на каждый
+    файл каталога, и если она совпала с присланной, пары не читаются вовсе.
+    """
+    _user_id(request)  # проверка подписи Telegram; расписание общее для всех
+    name = teacher_svc.clean_name(request.query.get("name", ""))
+    if not name:
+        raise web.HTTPBadRequest(text="Не указан преподаватель")
+
+    async with SessionLocal() as session:
+        today = date.today()
+        etag = teacher_etag(name, await teacher_svc.catalog_stamp(session), today)
+        if request.headers.get("If-None-Match") == etag:
+            return web.Response(status=304, headers={"ETag": etag})
+        rows = await teacher_svc.lessons_of_teacher(session, name)
+        if not rows:
+            raise web.HTTPNotFound(text="Такого преподавателя в расписаниях нет")
+        payload = teacher_json(name, rows, today, version=etag)
+    return web.json_response(payload, headers={"ETag": etag}, dumps=_dumps_utf8)
 
 
 async def handle_select_group(request: web.Request) -> web.Response:
@@ -331,6 +401,8 @@ def create_app() -> web.Application:
             web.get("/", handle_index),
             web.get("/api/health", handle_health),
             web.get("/api/schedule", handle_schedule),
+            web.get("/api/teachers", handle_teachers),
+            web.get("/api/teacher", handle_teacher),
             web.get("/api/settings", handle_settings),
             web.post("/api/source", handle_pick_source),
             web.post("/api/group", handle_select_group),

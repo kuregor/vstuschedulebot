@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 from ..config import settings
 from ..db.models import Group, Lesson, ProgramLevel, ScheduleSource
+from ..services.notes_service import fold_subject
+from ..services.teacher_service import SUBJECTS_IN_DIRECTORY, TeacherSummary
 from ..utils.formatting import (
     DOW_FULL,
     DOW_SHORT,
@@ -254,18 +257,39 @@ def _week_range_label(span: tuple[date, date], today: date) -> str:
     return label
 
 
+def _in_grid_order(lessons: list[Lesson]) -> list[Lesson]:
+    """Порядок пар в списке: неделя, день, номер пары, время начала."""
+    return sorted(lessons, key=lambda x: (x.week, x.weekday, x.slot_from, x.start_time))
+
+
 def schedule_json(
     group: Group,
     lessons: list[Lesson],
     today: date | None = None,
     version: str = "",
 ) -> dict:
-    start, end = semester_bounds()
-    today = today or date.today()
+    items = [_lesson_json(lesson) for lesson in _in_grid_order(lessons)]
+    return {
+        # По этой метке приложение потом спрашивает «не изменилось ли»
+        # и в ответ получает 304 без тела.
+        "version": version,
+        "group": group_json(group),
+        **_layout(items, today or date.today()),
+    }
 
-    by_week: dict[int, dict[int, list[Lesson]]] = defaultdict(lambda: defaultdict(list))
-    for lesson in lessons:
-        by_week[lesson.week][lesson.weekday].append(lesson)
+
+def _layout(items: list[dict], today: date) -> dict:
+    """Недели, дни, месяцы календаря и индекс дат — из готовых строк пар.
+
+    Общая часть расписания группы и преподавателя: чья это сетка, ей не
+    важно. Пары приходят уже упорядоченными (см. `_in_grid_order`), внутри
+    дня этот порядок сохраняется.
+    """
+    start, end = semester_bounds()
+
+    by_week: dict[int, dict[int, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    for item in items:
+        by_week[item["week"]][item["weekday"]].append(item)
 
     weeks = []
     for week in (1, 2):
@@ -274,7 +298,6 @@ def schedule_json(
         span = week_occurrence(week, start, end, today)
         days = []
         for weekday in range(1, 7):
-            items = sorted(days_map.get(weekday, []), key=lambda x: (x.slot_from, x.start_time))
             is_today = today.isoweekday() == weekday and week_of(today, start) == week
             days.append(
                 {
@@ -283,7 +306,7 @@ def schedule_json(
                     "name": DOW_FULL[weekday - 1],
                     "dates": _day_dates_label(week, weekday, start, end),
                     "is_today": is_today,
-                    "lessons": [_lesson_json(lesson) for lesson in items],
+                    "lessons": days_map.get(weekday, []),
                 }
             )
         weeks.append(
@@ -303,9 +326,9 @@ def schedule_json(
 
     # индекс «дата -> id пар» для вкладки «Календарь»
     index: dict[str, list[int]] = defaultdict(list)
-    for lesson in lessons:
-        for item in lesson.dates:
-            index[item.on_date.isoformat()].append(lesson.id)
+    for item in items:
+        for on in item["dates"]:
+            index[on].append(item["id"])
 
     months = []
     cursor = date(start.year, start.month, 1)
@@ -330,10 +353,6 @@ def schedule_json(
         day += timedelta(days=1)
 
     return {
-        # По этой метке приложение потом спрашивает «не изменилось ли»
-        # и в ответ получает 304 без тела.
-        "version": version,
-        "group": group_json(group),
         "semester": {
             "start": start.isoformat(),
             "end": end.isoformat(),
@@ -345,4 +364,120 @@ def schedule_json(
         "months": months,
         "index": index,
         "busy": {"days": busy_total, "study_days": study_total},
+    }
+
+
+# ── преподаватель ──────────────────────────────────────────────────────
+
+
+def teacher_etag(name: str, stamp: str, today: date) -> str:
+    """Версия расписания преподавателя — как `schedule_etag`, только от
+    всего каталога сразу: его пары собраны из разных файлов."""
+    start, end = semester_bounds()
+    raw = "|".join(
+        [
+            str(SCHEDULE_FORMAT_VERSION),
+            "teacher",
+            name,
+            stamp,
+            today.isoformat(),
+            start.isoformat(),
+            end.isoformat(),
+        ]
+    )
+    return '"' + hashlib.sha1(raw.encode()).hexdigest()[:16] + '"'
+
+
+def teachers_etag(group_id: int | None, stamp: str) -> str:
+    """Версия справочника преподавателей: каталог файлов плюс группа, от
+    которой считается «ведут у группы». От даты он не зависит."""
+    raw = "|".join([str(SCHEDULE_FORMAT_VERSION), "teachers", str(group_id or ""), stamp])
+    return '"' + hashlib.sha1(raw.encode()).hexdigest()[:16] + '"'
+
+
+def _natural(value: str) -> list:
+    """«САПР-1.10» после «САПР-1.9»: числа в названии группы сравниваются как числа."""
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", value)]
+
+
+def teacher_json(
+    name: str,
+    rows: list[tuple[Lesson, str]],
+    today: date | None = None,
+    version: str = "",
+) -> dict:
+    """Расписание преподавателя по всем группам — в той же раскладке, что у группы.
+
+    Лекция на поток лежит в базе строкой у каждой группы потока. Для
+    преподавателя это одна пара, поэтому строки с одним местом в сетке,
+    предметом, типом, аудиторией и одинаковыми датами сливаются в одну, а
+    группы перечисляются в `groups`. Даты в ключе нарочно: лабы двух групп в
+    одном слоте через неделю — это две разные пары, и пусть они стоят блоком
+    «2 ПАРЫ», как у группы.
+
+    `id` сводной пары — меньший из id её строк, `ids` — все: по ним
+    приложение узнаёт пару своей группы и вешает на неё заметки.
+    """
+    merged: dict[tuple, list[tuple[Lesson, str]]] = {}
+    for lesson, group_name in rows:
+        days = tuple(sorted(d.on_date for d in lesson.dates))
+        key = (
+            lesson.week,
+            lesson.weekday,
+            lesson.slot_from,
+            lesson.slot_to,
+            lesson.start_time,
+            lesson.end_time,
+            fold_subject(lesson.subject),
+            lesson.lesson_type.value,
+            fold_subject(lesson.room),
+            days,
+        )
+        merged.setdefault(key, []).append((lesson, group_name))
+
+    items = []
+    for entries in merged.values():
+        entries.sort(key=lambda entry: _natural(entry[1]))
+        lessons = [lesson for lesson, _ in entries]
+        item = _lesson_json(lessons[0])
+        item["id"] = min(lesson.id for lesson in lessons)
+        item["ids"] = sorted(lesson.id for lesson in lessons)
+        item["groups"] = list(dict.fromkeys(group_name for _, group_name in entries))
+        item["teacher"] = name
+        item["note"] = next((lesson.raw_note for lesson in lessons if lesson.raw_note), "")
+        items.append((lessons[0], item))
+
+    items.sort(key=lambda pair: (pair[0].week, pair[0].weekday, pair[0].slot_from, pair[0].start_time))
+    body = [item for _, item in items]
+    groups = {group for item in body for group in item["groups"]}
+    return {
+        "version": version,
+        "teacher": {"name": name, "lessons": len(body), "groups": len(groups)},
+        **_layout(body, today or date.today()),
+    }
+
+
+def teachers_json(
+    everyone: dict[str, TeacherSummary],
+    at_group: dict[str, TeacherSummary],
+    group: Group | None,
+    version: str = "",
+) -> dict:
+    """Справочник для шторки выбора преподавателя.
+
+    `teachers` — все, кто есть в расписаниях, для поиска по фамилии; предметов
+    у каждого не больше двух, иначе ответ раздувается в разы. `mine` — те, кто
+    ведёт у выбранной группы: с этого списка шторка открывается, и число пар
+    с предметами здесь про эту группу.
+    """
+    return {
+        # как у расписания: по этой метке приложение потом спрашивает
+        # «не изменилось ли» и держит ответ в своём кэше
+        "version": version,
+        "group": group.name if group is not None else "",
+        "teachers": [
+            summary.json(SUBJECTS_IN_DIRECTORY)
+            for summary in sorted(everyone.values(), key=lambda s: s.name)
+        ],
+        "mine": [summary.json() for summary in sorted(at_group.values(), key=lambda s: s.name)],
     }

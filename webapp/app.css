@@ -62,13 +62,46 @@ body::-webkit-scrollbar,
 }
 
 .topbar-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; }
-.title-col { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+/* Заголовок — кнопка: в режиме преподавателя по нему выбирают другого.
+   Длинное имя обрезается многоточием, а не выталкивает кнопку режима. */
+.title-col {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto;
+  border: 0; background: transparent; padding: 0; text-align: left;
+  font-family: inherit; color: inherit; cursor: default;
+}
+.title-col.pickable { cursor: pointer; }
+.title-col.pickable:active { opacity: 0.72; }
+.title-line { display: flex; align-items: center; gap: 5px; min-width: 0; }
 
-.screen-title { font-size: 26px; font-weight: 800; letter-spacing: -0.5px; line-height: 1; }
+.screen-title {
+  font-size: 26px; font-weight: 800; letter-spacing: -0.5px; line-height: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.screen-title.small { font-size: 20px; }
+.title-chev { width: 18px; height: 18px; flex: none; margin-top: 3px; color: var(--accent); }
+.title-chev svg { width: 100%; height: 100%; display: block; }
 
-.subtitle { font-size: 11px; font-weight: 500; color: rgba(23, 22, 26, 0.55); }
+.subtitle {
+  font-size: 11px; font-weight: 500; color: rgba(23, 22, 26, 0.55);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
-.now-col { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: none; }
+.top-right { display: flex; align-items: center; gap: 10px; flex: none; }
+
+/* Кнопка режима «Группа / Преподаватель» из макета 2a: серая, пока на экране
+   группа, и зелёная, когда открыт преподаватель. */
+.mode-pill {
+  height: 30px; border: 0; border-radius: 9px; cursor: pointer; flex: none;
+  display: flex; align-items: center; gap: 5px; padding: 0 10px;
+  font-family: inherit; font-size: 11px; font-weight: 700; white-space: nowrap;
+  background: rgba(23, 22, 26, 0.06); color: var(--ink);
+  transition: all 0.18s;
+}
+.mode-pill svg { width: 13px; height: 13px; flex: none; }
+.mode-pill.on { background: var(--accent); color: var(--card); }
+.mode-pill:active { filter: brightness(0.95); }
+
+.now-col { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 3px; height: 30px; flex: none; }
 .now-label { font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 500; color: rgba(23, 22, 26, 0.5); }
 .now-week { font-size: 12px; font-weight: 700; color: var(--accent); }
 
@@ -218,9 +251,13 @@ body::-webkit-scrollbar,
   display: flex; flex-direction: column; align-items: center; gap: 4px;
   font-family: inherit; padding: 2px 0;
 }
-.tabbar .icon { width: 18px; height: 18px; border-radius: 5px; border: 2px solid rgba(23, 22, 26, 0.4); }
+.tabbar .icon {
+  width: 24px; height: 24px; display: flex; align-items: center; justify-content: center;
+  color: rgba(23, 22, 26, 0.4);
+}
+.tabbar .icon svg { width: 24px; height: 24px; }
 .tabbar .label { font-size: 9.5px; font-weight: 700; color: rgba(23, 22, 26, 0.4); }
-.tabbar button.on .icon { border-color: var(--ink); background: var(--ink); }
+.tabbar button.on .icon,
 .tabbar button.on .label { color: var(--ink); }
 
 /* ── шторки ──────────────────────────────────────────────────────── */
@@ -321,6 +358,27 @@ body::-webkit-scrollbar,
   border: 2px solid rgba(23, 22, 26, 0.2); background: transparent;
 }
 .opt.on .opt-ring { border-color: var(--accent); background: var(--accent); box-shadow: inset 0 0 0 3px var(--card); }
+
+/* Выбор преподавателя: поиск над списком и подписи разделов. */
+.search {
+  display: flex; align-items: center; gap: 8px; margin: 12px 0 10px;
+  background: var(--chip); border-radius: 12px; padding: 0 12px;
+}
+.search-icon { width: 16px; height: 16px; flex: none; color: rgba(23, 22, 26, 0.45); }
+.search-icon svg { width: 100%; height: 100%; display: block; }
+.search input {
+  flex: 1; min-width: 0; border: 0; outline: none; background: transparent;
+  padding: 11px 0; font-family: inherit; font-size: 13px; font-weight: 600; color: var(--ink);
+  -webkit-appearance: none; appearance: none;
+}
+.search input::placeholder { color: rgba(23, 22, 26, 0.4); }
+.search input::-webkit-search-cancel-button { -webkit-appearance: none; }
+.opt-cap {
+  padding: 8px 4px 2px; font-size: 10px; font-weight: 800; letter-spacing: 0.5px;
+  color: rgba(23, 22, 26, 0.5);
+}
+.opt-cap:first-child { padding-top: 0; }
+.opt-hint { padding: 8px 4px 2px; font-size: 10.5px; font-weight: 500; line-height: 1.35; color: rgba(23, 22, 26, 0.5); }
 
 /* состояния загрузки и ошибки */
 .state { padding: 60px 24px; text-align: center; color: rgba(23, 22, 26, 0.6); font-size: 13px; font-weight: 600; }

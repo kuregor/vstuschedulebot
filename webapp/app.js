@@ -1,6 +1,7 @@
-/* Mini App «Расписание». Поведение перенесено из макета Claude Design:
-   вкладки Расписание/Календарь, фильтр недель, шторки пары и дня.
-   Данные приходят из /api/schedule. */
+/* Mini App «Расписание». Поведение перенесено из макета Claude Design
+   (ScheduleApp, вариант 2a): вкладки Расписание/Календарь/Настройки, фильтр
+   недель, шторки пары и дня, режим преподавателя — кнопка в шапке.
+   Данные приходят из /api/schedule и /api/teacher. */
 
 const tg = window.Telegram?.WebApp;
 const SOURCE_URL = "https://www.vstu.ru/student/raspisanie-zanyatiy/";
@@ -25,6 +26,11 @@ const state = {
   real: false,
   // заметки: ключ «id пары|дата» -> текст; дата выбранная в шторке пары
   notes: {}, sheetDate: "",
+  // Режим преподавателя: чьё расписание открыто вместо группы. Пусто — своя
+  // группа. tdata/tlessons — то же, что data/lessons, но для преподавателя;
+  // terror — почему его расписание не загрузилось. teachers — справочник
+  // для шторки выбора, читается при первом её открытии.
+  teacher: "", tdata: null, tlessons: new Map(), terror: "", teachers: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -143,6 +149,124 @@ function writeNotes(notes) {
   } catch (err) {
     /* переполнен или запрещён — обойдёмся без кэша */
   }
+}
+
+/* Открытый преподаватель переживает перезапуск приложения: им пользуются и
+   сами преподаватели, которым своя группа ни к чему.
+
+   Ответы /api/teacher лежат в кэше так же, как расписание группы: открытый
+   однажды преподаватель встаёт на экран сразу, а у сервера спрашивается
+   только «не изменилось ли» (If-None-Match -> 304). Хранятся несколько
+   последних — студенты обычно смотрят двух-трёх своих преподавателей по
+   очереди, и перекачивать каждого при переключении незачем. Самый давний
+   вытесняется, чтобы кэш не рос без края: один ответ — десятки килобайт.
+
+   Справочник для шторки выбора кэшируется отдельно, по группе: от неё
+   зависит список «ведут у группы». */
+const TEACHER_KEY = "vstu.teacher";
+const TEACHERS_CACHE_KEY = "vstu.teachers.cache";
+const TEACHERS_CACHE_SIZE = 6;
+const DIRECTORY_KEY = "vstu.teachers.dir";
+// прежний формат — одна ячейка на последнего преподавателя
+const LEGACY_TEACHER_CACHE_KEY = "vstu.teacher.cache";
+
+function readTeacher() {
+  try {
+    return localStorage.getItem(TEACHER_KEY) || "";
+  } catch (err) {
+    return "";
+  }
+}
+
+function writeTeacher(name) {
+  try {
+    if (name) localStorage.setItem(TEACHER_KEY, name);
+    else localStorage.removeItem(TEACHER_KEY);
+  } catch (err) {
+    /* см. выше */
+  }
+}
+
+/* {имя: {etag, checkedAt, usedAt, data}} */
+function readTeacherBoxes() {
+  try {
+    const all = JSON.parse(localStorage.getItem(TEACHERS_CACHE_KEY) || "null");
+    return all && typeof all === "object" ? all : {};
+  } catch (err) {
+    return {};
+  }
+}
+
+function readTeacherCache(name) {
+  const box = readTeacherBoxes()[name];
+  return box && box.data && box.etag ? box : null;
+}
+
+/* Запись заодно отмечает, что преподавателя открывали сейчас: по этой
+   отметке и решается, кого вытеснить. */
+function writeTeacherCache(name, box) {
+  const all = readTeacherBoxes();
+  all[name] = Object.assign({}, box, { usedAt: Date.now() });
+  Object.keys(all)
+    .sort((a, b) => (all[b].usedAt || 0) - (all[a].usedAt || 0))
+    .slice(TEACHERS_CACHE_SIZE)
+    .forEach((old) => delete all[old]);
+  try {
+    localStorage.removeItem(LEGACY_TEACHER_CACHE_KEY);
+    localStorage.setItem(TEACHERS_CACHE_KEY, JSON.stringify(all));
+  } catch (err) {
+    // Места не хватило на всех — оставляем хотя бы открытого сейчас.
+    try {
+      localStorage.setItem(TEACHERS_CACHE_KEY, JSON.stringify({ [name]: all[name] }));
+    } catch (again) {
+      /* переполнен или запрещён — обойдёмся без кэша */
+    }
+  }
+}
+
+/* Справочник для шторки выбора: {group, etag, checkedAt, data}. */
+function readDirectory(group) {
+  try {
+    const box = JSON.parse(localStorage.getItem(DIRECTORY_KEY) || "null");
+    return box && box.group === group && box.etag && box.data ? box : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function writeDirectory(box) {
+  try {
+    localStorage.setItem(DIRECTORY_KEY, JSON.stringify(box));
+  } catch (err) {
+    /* см. выше */
+  }
+}
+
+/* Что сейчас на экране: расписание преподавателя или группы. В настройках
+   режим не действует — там всегда про свою группу, как в макете. */
+const teacherMode = () => !!state.teacher && state.tab !== "settings";
+const current = () => (teacherMode() ? state.tdata : state.data);
+const currentLessons = () => (teacherMode() ? state.tlessons : state.lessons);
+const hasSchedule = (data) => !!data && !data.empty;
+
+/* Кого показать в строке пары на месте преподавателя. У преподавателя там
+   группы: для него это главное «кто придёт». Больше трёх не влезает —
+   остальные числом, полный список в шторке пары. */
+function whoOf(lesson) {
+  if (!lesson.groups) return lesson.teacher;
+  const groups = lesson.groups;
+  return groups.length > 3
+    ? `${groups.slice(0, 2).join(", ")} +${groups.length - 2}`
+    : groups.join(", ");
+}
+
+/* Пара преподавателя, которая есть и у своей группы, — с id этой пары.
+   Заметки живут на расписании своей группы (сервер хранит их по группе),
+   поэтому писать их можно только к таким парам. У остальных — null. */
+function noteLessonOf(lesson) {
+  if (!lesson.ids) return lesson;
+  const own = lesson.ids.find((id) => state.lessons.has(id));
+  return own ? Object.assign({}, lesson, { id: own }) : null;
 }
 
 const noteKey = (lessonId, iso) => `${lessonId}|${iso}`;
@@ -281,16 +405,146 @@ async function loadSchedule(groupId, etag = "") {
   writeCache({ etag: data.version, checkedAt: Date.now(), data });
 }
 
+/* ── режим преподавателя ─────────────────────────────────────────── */
+
+function applyTeacher(data) {
+  state.tdata = data;
+  state.terror = "";
+  state.tlessons = new Map();
+  data.weeks.forEach((week) => week.days.forEach((day) =>
+    day.lessons.forEach((lesson) => state.tlessons.set(lesson.id, lesson))));
+}
+
+/* Расписание преподавателя — по той же схеме, что и группы: из кэша сразу,
+   у сервера условным запросом. Пока ответ шёл, человек мог выбрать другого
+   преподавателя или вернуться к группе — тогда ответ уже не нужен. */
+async function loadTeacher(name) {
+  const cached = readTeacherCache(name);
+  if (cached) {
+    applyTeacher(cached.data);
+    render();
+    if (Date.now() - cached.checkedAt < CACHE_TRUST_MS) {
+      writeTeacherCache(name, cached);  // только отметка «открывали сейчас»
+      return;
+    }
+  }
+  try {
+    const data = await api(`/api/teacher?name=${encodeURIComponent(name)}`,
+      cached ? { headers: { "If-None-Match": cached.etag } } : {});
+    // В кэш кладём в любом случае: даже если человек уже переключился,
+    // ответ пригодится, когда он вернётся к этому преподавателю.
+    if (data === NOT_MODIFIED) {
+      writeTeacherCache(name, Object.assign(cached, { checkedAt: Date.now() }));
+      return;
+    }
+    writeTeacherCache(name, { etag: data.version, checkedAt: Date.now(), data });
+    if (state.teacher !== name) return;
+    applyTeacher(data);
+    render();
+  } catch (err) {
+    if (state.teacher !== name || state.tdata) return;
+    state.terror = explainFailure(err);
+    render();
+  }
+}
+
+function pickTeacher(name) {
+  haptic("medium");
+  state.teacher = name;
+  state.tdata = null;
+  state.terror = "";
+  writeTeacher(name);
+  if (state.tab === "settings") state.tab = "list";
+  render();
+  loadTeacher(name);
+}
+
+function clearTeacher() {
+  haptic();
+  state.teacher = "";
+  state.tdata = null;
+  state.terror = "";
+  writeTeacher("");
+  render();
+}
+
+/* Справочник для шторки выбора: все преподаватели и те, кто ведёт у
+   группы. Меняется только с перезаливом файлов, поэтому живёт в кэше, как
+   расписание: шторка открывается сразу из него, а сервер отвечает 304.
+   Возвращает true, если пришёл новый справочник и шторку стоит перерисовать. */
+const directoryGroup = () => (hasSchedule(state.data) ? String(state.data.group.id) : "");
+
+function cachedDirectory() {
+  if (!state.teachers) state.teachers = readDirectory(directoryGroup())?.data || null;
+  return state.teachers;
+}
+
+async function loadTeachers() {
+  const group = directoryGroup();
+  const cached = readDirectory(group);
+  if (cached && Date.now() - cached.checkedAt < CACHE_TRUST_MS) {
+    state.teachers = cached.data;
+    return false;
+  }
+  const data = await api(`/api/teachers${group ? `?group_id=${group}` : ""}`,
+    cached ? { headers: { "If-None-Match": cached.etag } } : {});
+  if (data === NOT_MODIFIED) {
+    writeDirectory(Object.assign(cached, { checkedAt: Date.now() }));
+    state.teachers = cached.data;
+    return false;
+  }
+  writeDirectory({ group, etag: data.version, checkedAt: Date.now(), data });
+  state.teachers = data;
+  return true;
+}
+
 /* ── шапка ───────────────────────────────────────────────────────── */
+
+const ICON_PERSON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+  + 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+  + '<circle cx="12" cy="8" r="4"></circle><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"></path></svg>';
+const ICON_CHEVRON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+  + 'stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">'
+  + '<path d="M6 9l6 6 6-6"></path></svg>';
+const ICON_SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+  + 'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+  + '<circle cx="11" cy="11" r="7"></circle><path d="M20 20l-4-4"></path></svg>';
+
+/* Заголовок шапки ужимается, пока не влезет, но не мельче 16px — дальше
+   уже многоточие. Рядом с ним кнопка режима и «Сейчас», и на телефоне
+   шириной 375px фамилия преподавателя в 20px обрезалась на полуслове. */
+const TITLE_MIN_PX = 16;
+
+function fitTitle() {
+  const title = document.querySelector("#topbar .screen-title");
+  if (!title) return;
+  title.style.fontSize = "";
+  let size = parseFloat(getComputedStyle(title).fontSize);
+  while (title.scrollWidth > title.clientWidth && size > TITLE_MIN_PX) {
+    size -= 1;
+    title.style.fontSize = `${size}px`;
+  }
+}
+
+/* «18 пар · 20 групп» под именем преподавателя. */
+function groupsWord(n) {
+  const form = n % 10 === 1 && n % 100 !== 11 ? "группа"
+    : n % 10 >= 2 && n % 10 <= 4 && !(n % 100 >= 12 && n % 100 <= 14) ? "группы" : "групп";
+  return `${n} ${form}`;
+}
 
 function renderTopbar() {
   const bar = $("topbar");
   bar.replaceChildren();
-  const data = state.data;
-  const loaded = data && !data.empty;
+  const data = current();
+  const loaded = hasSchedule(data);
+  const tmode = teacherMode();
 
   const row = el("div", "topbar-row");
-  const titles = el("div", "title-col");
+  // В режиме преподавателя заголовок — кнопка: имя со стрелкой вниз
+  // открывает выбор другого преподавателя, как в макете.
+  const titles = el("button", `title-col${tmode ? " pickable" : ""}`);
+  titles.type = "button";
 
   // Группа выбирается в настройках, поэтому в шапке это просто заголовок.
   // Дефис в названии заменён тонким пробелом — так в макете: «САПР 1.4».
@@ -299,22 +553,55 @@ function renderTopbar() {
   if (state.tab === "settings") {
     title = "Настройки";
     sub = "";
+  } else if (tmode) {
+    // «Преподаватель» уже написано на зелёной кнопке справа — под именем
+    // только счёт, иначе на узком телефоне подпись уходит в многоточие
+    title = state.teacher;
+    sub = loaded
+      ? `${pluralPairs(data.teacher.lessons).toLowerCase()} · ${groupsWord(data.teacher.groups)}`
+      : "загружаем расписание…";
   } else if (loaded) {
     title = data.group.name.replace("-", " ");
-    sub = [data.group.level_title, data.group.course ? `${data.group.course} курс` : "",
-      data.group.faculty, data.semester.title].filter(Boolean).join(" · ");
+    // Подписи под группой нет, как в макете 2a: уровень, курс и факультет
+    // видны в настройках, а рядом с кнопкой режима строка всё равно
+    // обрезалась многоточием.
+    sub = "";
   }
-  titles.append(el("div", "screen-title", title));
-  if (sub) titles.append(el("div", "subtitle", sub));
+  const line = el("span", "title-line");
+  line.append(el("span", `screen-title${tmode ? " small" : ""}`, title));
+  if (tmode) {
+    const chev = el("span", "title-chev");
+    chev.innerHTML = ICON_CHEVRON;
+    line.append(chev);
+    titles.onclick = () => { haptic(); openTeacherPicker(); };
+  }
+  titles.append(line);
+  if (sub) titles.append(el("span", "subtitle", sub));
   row.append(titles);
 
+  const right = el("div", "top-right");
+  if (state.tab !== "settings") {
+    // Кнопка режима: показывает, чьё расписание на экране. Из группы
+    // открывает выбор преподавателя, из преподавателя возвращает к группе.
+    const pill = el("button", `mode-pill${tmode ? " on" : ""}`);
+    pill.type = "button";
+    pill.innerHTML = ICON_PERSON;
+    pill.append(el("span", null, tmode ? "Преподаватель" : "Группа"));
+    pill.onclick = () => {
+      if (tmode) clearTeacher();
+      else { haptic(); openTeacherPicker(); }
+    };
+    right.append(pill);
+  }
   if (loaded) {
     const now = el("div", "now-col");
     now.append(el("div", "now-label", "СЕЙЧАС"),
       el("div", "now-week", `Неделя ${data.semester.current_week}`));
-    row.append(now);
+    right.append(now);
   }
+  if (right.childElementCount) row.append(right);
   bar.append(row);
+  fitTitle();
 
   if (state.tab === "settings") {
     syncTopbarHeight();
@@ -441,7 +728,7 @@ function lessonNode(lesson) {
   badge.style.background = paint(lesson.type).color;
   meta.append(badge);
   if (lesson.room) meta.append(el("span", "lesson-room", lesson.room));
-  if (lesson.teacher) meta.append(el("span", "lesson-teacher", lesson.teacher));
+  if (whoOf(lesson)) meta.append(el("span", "lesson-teacher", whoOf(lesson)));
   main.append(meta);
 
   if (lesson.dates.length) {
@@ -453,7 +740,8 @@ function lessonNode(lesson) {
     main.append(el("div", "lesson-dates", lesson.note));
   }
 
-  const notes = notesOfLesson(lesson);
+  const own = noteLessonOf(lesson);
+  const notes = own ? notesOfLesson(own) : [];
   if (notes.length) {
     const box = el("div", "notes");
     notes.forEach((item) =>
@@ -469,7 +757,7 @@ function lessonNode(lesson) {
 function renderList() {
   const view = $("view");
   const wrap = el("div", "list");
-  const weeks = state.data.weeks.filter((w) => state.filter === "both" || String(w.id) === state.filter);
+  const weeks = current().weeks.filter((w) => state.filter === "both" || String(w.id) === state.filter);
 
   weeks.forEach((week) => {
     // пустые дни в финальном макете скрыты; в режиме «реальные пары» день
@@ -542,10 +830,12 @@ function renderList() {
 function renderCalendar() {
   const view = $("view");
   const wrap = el("div", "cal");
-  const index = state.data.index;
-  const today = state.data.semester.today;
+  const data = current();
+  const lessons = currentLessons();
+  const index = data.index;
+  const today = data.semester.today;
 
-  state.data.months.forEach((month) => {
+  data.months.forEach((month) => {
     const card = el("div", "month");
     const head = el("div", "month-head");
 
@@ -582,7 +872,7 @@ function renderCalendar() {
 
       if (ids.length) {
         const dots = el("div", "cell-dots");
-        ids.map((id) => state.lessons.get(id)).filter(Boolean)
+        ids.map((id) => lessons.get(id)).filter(Boolean)
           .sort((a, b) => TYPE_ORDER.indexOf(a.type) - TYPE_ORDER.indexOf(b.type))
           .forEach((lesson) => {
             const dot = el("span");
@@ -621,7 +911,14 @@ function openSheet(build) {
 
   root.append(scrim, sheet);
   state.sheet = true;
-  tg?.BackButton?.show?.();
+  syncBackButton();
+}
+
+/* Кнопка «Назад» Telegram: закрывает шторку, а без шторки в режиме
+   преподавателя — возвращает к своей группе. Обработчик один — в boot(). */
+function syncBackButton() {
+  if (state.sheet || teacherMode()) tg?.BackButton?.show?.();
+  else tg?.BackButton?.hide?.();
 }
 
 function closeSheet() {
@@ -634,7 +931,7 @@ function closeSheet() {
   $("sheet-root").hidden = true;
   $("sheet-root").replaceChildren();
   state.sheet = null;
-  tg?.BackButton?.hide?.();
+  syncBackButton();
 }
 
 /* Даты занятия и заметка на выбранную дату — сердце шторки пары.
@@ -964,14 +1261,25 @@ function openLessonSheet(lesson) {
       el("div", "val mono", `${lesson.start} – ${lesson.end}`),
       el("div", "sub mono", `пары ${lesson.slot}`));
     const roomFact = el("div", "fact");
+    // у преподавателя под аудиторией — все группы пары, без сокращения
     roomFact.append(el("div", "cap", "АУДИТОРИЯ"),
       el("div", "val", lesson.room || "—"),
-      el("div", "sub", lesson.teacher || ""));
+      el("div", "sub", lesson.groups ? lesson.groups.join(", ") : lesson.teacher || ""));
     facts.append(timeFact, roomFact);
     sheet.append(facts);
 
-    if (lesson.dates.length) {
-      sheet.append(datesAndNote(lesson));
+    const own = noteLessonOf(lesson);
+    if (lesson.dates.length && own) {
+      sheet.append(datesAndNote(own));
+    } else if (lesson.dates.length) {
+      // пара чужой группы: даты показываем, а заметку вешать не на что —
+      // заметки живут на расписании своей группы
+      const cap = el("div", "sheet-cap");
+      cap.append(el("span", null, "ДАТЫ ЗАНЯТИЙ"),
+        el("span", "cap-note", "заметки — к парам своей группы"));
+      const chips = el("div", "chips");
+      lesson.dates.forEach((iso) => chips.append(el("span", "chip", shortDate(iso))));
+      sheet.append(cap, chips);
     } else {
       // дат нет — вешать заметку не на что, показываем только текст из файла
       sheet.append(el("div", "sheet-cap", "ДАТЫ ЗАНЯТИЙ"));
@@ -988,7 +1296,7 @@ function openLessonSheet(lesson) {
 }
 
 function openDaySheet(isoDate, ids) {
-  const lessons = ids.map((id) => state.lessons.get(id)).filter(Boolean)
+  const lessons = ids.map((id) => currentLessons().get(id)).filter(Boolean)
     .sort((a, b) => a.start.localeCompare(b.start));
   const [y, m, d] = isoDate.split("-").map(Number);
   const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
@@ -1023,10 +1331,11 @@ function openDaySheet(isoDate, ids) {
       badge.style.background = paint(lesson.type).color;
       meta.append(badge);
       if (lesson.room) meta.append(el("span", "lesson-room", lesson.room));
-      if (lesson.teacher) meta.append(el("span", "lesson-teacher", lesson.teacher));
+      if (whoOf(lesson)) meta.append(el("span", "lesson-teacher", whoOf(lesson)));
       main.append(meta);
 
-      const note = noteAt(lesson.id, isoDate);
+      const own = noteLessonOf(lesson);
+      const note = own ? noteAt(own.id, isoDate) : null;
       if (note) main.append(noteLine("", note.text, note.remind));
 
       row.append(time, bar, main);
@@ -1262,6 +1571,98 @@ function openPicker(kind) {
   openSheet(build);
 }
 
+/* Шторка выбора преподавателя — из макета: поиск сверху, список с кружком
+   выбора справа. Открывается теми, кто ведёт у своей группы; поиск идёт по
+   всем преподавателям всех файлов сайта — по фамилии или по предмету. */
+const SEARCH_LIMIT = 60;
+const fold = (value) => (value || "").toLowerCase().replace(/ё/g, "е");
+
+/* Предмет ищется с начала слова: иначе «иван» находил «обслуживание» и
+   список заполнялся посторонними. Запрос из нескольких слов — фразой. */
+function subjectHit(subject, query) {
+  const text = fold(subject);
+  if (query.includes(" ")) return text.includes(query);
+  return text.split(/[^a-zа-я0-9]+/).some((word) => word.startsWith(query));
+}
+
+function openTeacherPicker() {
+  openSheet((sheet) => {
+    sheet.append(el("div", "sheet-title", "Преподаватель"));
+
+    const search = el("label", "search");
+    const icon = el("span", "search-icon");
+    icon.innerHTML = ICON_SEARCH;
+    const input = el("input");
+    input.type = "search";
+    input.placeholder = "Фамилия или предмет";
+    input.autocomplete = "off";
+    input.enterKeyHint = "search";
+    // Enter только прячет клавиатуру: список и так фильтруется на ходу
+    input.onkeydown = (event) => { if (event.key === "Enter") input.blur(); };
+    search.append(icon, input);
+
+    const list = el("div", "opt-list");
+    sheet.append(search, list);
+
+    const subOf = (teacher) => [pluralPairs(teacher.count).toLowerCase(),
+      teacher.subjects.join(", ")].filter(Boolean).join(" · ");
+    const option = (teacher) => optionNode(teacher.name, subOf(teacher),
+      teacher.name === state.teacher, () => {
+        closeSheet();
+        if (teacher.name !== state.teacher) pickTeacher(teacher.name);
+      });
+
+    const paint = () => {
+      list.replaceChildren();
+      const box = state.teachers;
+      const query = fold(input.value.trim());
+
+      if (!query) {
+        // Открытый сейчас преподаватель может вести не у своей группы —
+        // тогда он наверху отдельной строкой, чтобы было видно, кто выбран.
+        const open = state.teacher && !box.mine.some((t) => t.name === state.teacher)
+          ? box.teachers.find((t) => t.name === state.teacher) : null;
+        if (open) list.append(el("div", "opt-cap", "ОТКРЫТ СЕЙЧАС"), option(open));
+        if (box.mine.length) {
+          list.append(el("div", "opt-cap", `ВЕДУТ У ГРУППЫ ${box.group}`));
+          box.mine.forEach((teacher) => list.append(option(teacher)));
+        }
+        list.append(el("div", "opt-hint", box.mine.length
+          ? "Остальных ищите по фамилии: в списке преподаватели всех факультетов."
+          : "Найдите преподавателя по фамилии или предмету: в списке все факультеты."));
+        return;
+      }
+
+      const found = box.teachers.filter((teacher) => fold(teacher.name).includes(query)
+        || teacher.subjects.some((subject) => subjectHit(subject, query)));
+      // выше те, чья фамилия начинается с набранного
+      found.sort((a, b) => (fold(b.name).startsWith(query) - fold(a.name).startsWith(query))
+        || a.name.localeCompare(b.name, "ru"));
+      list.append(el("div", "opt-cap", found.length
+        ? `НАШЛИ ${found.length}` : "НИКОГО НЕ НАШЛИ"));
+      found.slice(0, SEARCH_LIMIT).forEach((teacher) => list.append(option(teacher)));
+      if (found.length > SEARCH_LIMIT) {
+        list.append(el("div", "opt-hint", `Показаны первые ${SEARCH_LIMIT} — уточните запрос.`));
+      }
+    };
+
+    input.oninput = () => { if (state.teachers) paint(); };
+    // Из кэша — сразу; сверка с сервером идёт следом и перерисовывает
+    // список, только если справочник правда поменялся.
+    const shown = !!cachedDirectory();
+    if (shown) paint();
+    else list.append(loadingBox("Читаем список преподавателей…"));
+    loadTeachers()
+      .then((changed) => { if (list.isConnected && (changed || !shown)) paint(); })
+      .catch((err) => {
+        // без сети при списке из кэша молчим: он на экране, и им можно пользоваться
+        if (!list.isConnected || shown) return;
+        list.replaceChildren(el("div", "free-day",
+          `Список не загрузился: ${explainFailure(err)}`));
+      });
+  });
+}
+
 async function pickFile(file) {
   state.busy = true;
   $("view").replaceChildren(loadingBox("Открываем файл расписания…"));
@@ -1303,6 +1704,13 @@ async function pickGroup(group) {
     dropCache();
     state.notes = {};
     writeNotes(state.notes);
+    // «ведут у группы» в шторке преподавателя было про прежнюю группу
+    state.teachers = null;
+    // Группу выбирают, чтобы увидеть её расписание, — режим преподавателя
+    // тут только мешал бы.
+    state.teacher = "";
+    state.tdata = null;
+    writeTeacher("");
     await loadSchedule(group.id);
     refreshNotes(group.id);
   } catch (err) {
@@ -1314,12 +1722,26 @@ async function pickGroup(group) {
 
 /* ── каркас ──────────────────────────────────────────────────────── */
 
+/* Иконки нижней панели — контуры из макета, цвет берут у кнопки. */
+const TAB_ICONS = {
+  list: '<path d="M4 6h1"></path><path d="M4 12h1"></path><path d="M4 18h1"></path>'
+    + '<path d="M9 6h11"></path><path d="M9 12h11"></path><path d="M9 18h11"></path>',
+  cal: '<rect x="3" y="5" width="18" height="16" rx="3"></rect><path d="M8 3v4"></path>'
+    + '<path d="M16 3v4"></path><path d="M3 11h18"></path>',
+  settings: '<path d="M5 20v-6"></path><path d="M5 10V4"></path><path d="M12 20v-9"></path>'
+    + '<path d="M12 7V4"></path><path d="M19 20v-3"></path><path d="M19 13V4"></path>'
+    + '<path d="M2 14h6"></path><path d="M9 7h6"></path><path d="M16 17h6"></path>',
+};
+
 function renderTabs() {
   const bar = $("tabbar");
   bar.replaceChildren();
   [["list", "Расписание"], ["cal", "Календарь"], ["settings", "Настройки"]].forEach(([key, label]) => {
     const btn = el("button", state.tab === key ? "on" : null);
-    btn.append(el("span", "icon"), el("span", "label", label));
+    const icon = el("span", "icon");
+    icon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+      + `stroke-linecap="round" stroke-linejoin="round">${TAB_ICONS[key]}</svg>`;
+    btn.append(icon, el("span", "label", label));
     btn.onclick = () => { haptic(); openTab(key); };
     bar.append(btn);
   });
@@ -1346,6 +1768,21 @@ function render() {
 
   if (state.tab === "settings") {
     renderSettings();
+  } else if (teacherMode() && !state.tdata) {
+    // расписание преподавателя ещё идёт или не пришло; кнопка в шапке
+    // при этом на месте — к своей группе можно вернуться в любой момент
+    if (state.terror) {
+      showError(state.terror, () => {
+        state.terror = "";
+        render();
+        loadTeacher(state.teacher);
+      });
+    } else {
+      $("view").replaceChildren(loadingBox("Собираем расписание преподавателя…"));
+    }
+  } else if (teacherMode()) {
+    if (state.tab === "list") renderList();
+    else renderCalendar();
   } else if (!data || data.empty) {
     const box = el("div", "state");
     box.append(el("b", null, "Расписание не выбрано"),
@@ -1361,6 +1798,7 @@ function render() {
   }
 
   syncTopbarHeight();
+  syncBackButton();
   // при открытой шторке список остаётся там, где его листали: правка заметки
   // перерисовывает экран под шторкой, и прыжок наверх был бы заметен
   if (!state.sheet) window.scrollTo({ top: 0 });
@@ -1420,12 +1858,22 @@ function syncViewportHeight() {
 
 async function boot() {
   state.real = readReal();
+  // Manrope приезжает позже первого кадра и шире системного шрифта —
+  // заголовок подгоняется заново, когда шрифт загрузился.
+  document.fonts?.addEventListener?.("loadingdone", () => {
+    fitTitle();
+    syncTopbarHeight();
+  });
   if (tg) {
     tg.ready();
     tg.expand();
     tg.setHeaderColor?.("#f6f4f0");
     tg.setBackgroundColor?.("#f6f4f0");
-    tg.BackButton?.onClick?.(() => { if (state.sheet) closeSheet(); else tg.close(); });
+    tg.BackButton?.onClick?.(() => {
+      if (state.sheet) closeSheet();
+      else if (teacherMode()) clearTeacher();
+      else tg.close();
+    });
     tg.onEvent?.("viewportChanged", syncViewportHeight);
     syncViewportHeight();
   }
@@ -1450,6 +1898,13 @@ function refreshNotes(groupId = "") {
 
 async function loadInitial() {
   state.notes = readNotes();
+  // Открытый в прошлый раз преподаватель поднимается параллельно с группой:
+  // группа нужна и ему — по её парам видно, к чему можно писать заметки.
+  state.teacher = readTeacher();
+  if (state.teacher) {
+    render();
+    loadTeacher(state.teacher);
+  }
   const cached = readCache();
   if (cached) {
     applyData(cached.data);
@@ -1465,12 +1920,14 @@ async function loadInitial() {
     return;
   }
 
-  showLoading();
+  // На экране преподаватель — загрузку и ошибку группы не показываем поверх
+  // него: группа тут нужна только для заметок.
+  if (!teacherMode()) showLoading();
   try {
     await loadSchedule();
     refreshNotes();
   } catch (err) {
-    showError(explainFailure(err), loadInitial);
+    if (!teacherMode()) showError(explainFailure(err), loadInitial);
   }
 }
 
