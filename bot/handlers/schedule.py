@@ -9,15 +9,11 @@ import logging
 
 from aiogram import Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    MenuButtonCommands,
-    MenuButtonWebApp,
-    Message,
-    WebAppInfo,
-)
+from aiogram.types import Message
 
+from ..db.session import SessionLocal
+from ..services import button_service
+from ..services import schedule_service as svc
 from ..webapp import public_url
 
 router = Router()
@@ -39,27 +35,6 @@ NO_URL = (
 )
 
 
-def _webapp_kb() -> InlineKeyboardMarkup | None:
-    """Кнопка, открывающая Mini App внутри Telegram.
-
-    Адрес берётся на каждое построение кнопки: у быстрого туннеля он меняется
-    при переподключении, и закэшированный давал бы мёртвую страницу.
-    """
-    url = public_url.current()
-    if not url:
-        return None
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📅 Открыть расписание",
-                    web_app=WebAppInfo(url=url),
-                )
-            ]
-        ]
-    )
-
-
 async def _refresh_menu_button(message: Message, url: str) -> None:
     """Переставляет кнопку меню персонально для этого чата.
 
@@ -68,17 +43,9 @@ async def _refresh_menu_button(message: Message, url: str) -> None:
     конкретный чат, приходит клиенту сразу и перебивает закэшированную.
     """
     try:
-        if url:
-            await message.bot.set_chat_menu_button(
-                chat_id=message.chat.id,
-                menu_button=MenuButtonWebApp(
-                    text="Расписание", web_app=WebAppInfo(url=url)
-                ),
-            )
-        else:
-            await message.bot.set_chat_menu_button(
-                chat_id=message.chat.id, menu_button=MenuButtonCommands()
-            )
+        await message.bot.set_chat_menu_button(
+            chat_id=message.chat.id, menu_button=button_service.menu_button(url)
+        )
     except Exception:  # кнопка меню — украшение, из-за неё экран ронять незачем
         log.exception("Не удалось обновить кнопку меню чата %s", message.chat.id)
 
@@ -88,8 +55,14 @@ async def _refresh_menu_button(message: Message, url: str) -> None:
 async def cmd_start(message: Message) -> None:
     url = public_url.current()
     await _refresh_menu_button(message, url)
-    kb = _webapp_kb()
-    if kb is None:
+    # Чат должен попасть в список пользователей, даже если группа ещё не
+    # выбрана: по этому списку бот переставляет кнопку меню, когда адрес
+    # приложения сменится.
+    async with SessionLocal() as session:
+        await svc.ensure_user(session, message.chat.id)
+    if not url:
         await message.answer(NO_URL)
         return
-    await message.answer(WELCOME, reply_markup=kb)
+    # Кнопку под приветствием бот запоминает и переводит на новый адрес
+    # сам — нажимать /start после каждого перезапуска больше не нужно.
+    await button_service.send(message.bot, message.chat.id, WELCOME)

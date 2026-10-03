@@ -22,8 +22,14 @@ const state = {
   // экран настроек: каталог сайта, открытая шторка выбора и то, что в ней листают
   settings: null, picker: null, level: "", faculty: "", busy: false,
   // «Реальные пары»: показывать только те, что идут на ближайшем повторении
-  // недели, — см. realLessons(). Выбор с экрана настроек, живёт в localStorage.
+  // недели, — см. realLessons(). Выбор с экрана настроек; хранит его бот, на
+  // устройстве копия — см. «личные настройки».
   real: false,
+  // Первая загрузка группы, когда показать нечего даже из кэша: pending —
+  // запрос ещё идёт, failure — почему не вышло. Лежат в state, а не только
+  // на экране: пока идёт запрос, экран перерисовывают и другие (пришли
+  // настройки от бота), и показать он должен то же самое.
+  pending: false, failure: "",
   // заметки: ключ «id пары|дата» -> текст; дата выбранная в шторке пары
   notes: {}, sheetDate: "",
   // Режим преподавателя: чьё расписание открыто вместо группы. Пусто — своя
@@ -106,7 +112,8 @@ function dropCache() {
 
 /* Режим показа списка — выбор с экрана настроек. Хранится отдельно от кэша
    расписания: переключение не должно ронять сам кэш и заставлять приложение
-   идти в сеть. Обращения молчаливые по той же причине, что и у кэша. */
+   идти в сеть. Обращения молчаливые по той же причине, что и у кэша.
+   Это копия на устройстве, сам выбор хранит бот — см. «личные настройки». */
 const REAL_KEY = "vstu.real";
 
 function readReal() {
@@ -152,7 +159,8 @@ function writeNotes(notes) {
 }
 
 /* Открытый преподаватель переживает перезапуск приложения: им пользуются и
-   сами преподаватели, которым своя группа ни к чему.
+   сами преподаватели, которым своя группа ни к чему. Как и «Реальные пары»,
+   его хранит бот, а здесь лежит копия — см. «личные настройки».
 
    Ответы /api/teacher лежат в кэше так же, как расписание группы: открытый
    однажды преподаватель встаёт на экран сразу, а у сервера спрашивается
@@ -240,6 +248,105 @@ function writeDirectory(box) {
   } catch (err) {
     /* см. выше */
   }
+}
+
+/* ── личные настройки: хранит бот, на устройстве копия ─────────────
+
+   «Реальные пары» и открытый преподаватель раньше жили только в
+   localStorage. Но он привязан к адресу страницы, а адрес туннеля меняется
+   при каждом перезапуске бота: на новом поддомене localStorage пустой, и
+   настройки обнулялись. Теперь их хранит бот (/api/prefs), а копия на
+   устройстве нужна для первого кадра — чтобы экран сразу был правильным.
+
+   Правка уходит боту сразу. Не дошла — на устройстве остаётся пометка «не
+   отправлено», и при следующем запуске настройки отсюда отправляются снова,
+   а не затираются прежними с сервера. Без пометки при запуске главнее бот:
+   настройки могли поменять с другого телефона. */
+const PREFS_DIRTY_KEY = "vstu.prefs.dirty";
+
+function prefsDirty() {
+  try {
+    return localStorage.getItem(PREFS_DIRTY_KEY) === "1";
+  } catch (err) {
+    return false;
+  }
+}
+
+function markPrefs(dirty) {
+  try {
+    if (dirty) localStorage.setItem(PREFS_DIRTY_KEY, "1");
+    else localStorage.removeItem(PREFS_DIRTY_KEY);
+  } catch (err) {
+    /* см. выше */
+  }
+}
+
+/* Правки уходят по одной, и каждая несёт настройки целиком — какими они
+   стали к моменту отправки. Поэтому быстрые переключения подряд не придут к
+   боту в перевёрнутом порядке, а накопившиеся в очереди схлопываются в одну
+   отправку. */
+let prefsQueue = Promise.resolve();
+let prefsEdits = 0;
+
+function pushPrefs() {
+  const edit = ++prefsEdits;
+  markPrefs(true);
+  prefsQueue = prefsQueue.then(async () => {
+    if (edit !== prefsEdits) return;  // следом правка новее — она и отправит всё
+    try {
+      await api("/api/prefs", {
+        method: "POST",
+        body: JSON.stringify({ real: state.real, teacher: state.teacher }),
+      });
+      if (edit === prefsEdits) markPrefs(false);
+    } catch (err) {
+      /* связи нет — пометка остаётся, отправим при следующем запуске */
+    }
+  });
+}
+
+/* Сверка при запуске. Идёт параллельно с загрузкой расписания: ответ
+   крошечный и обычно приходит первым, так что экран сразу рисуется с
+   правильными настройками. */
+async function syncPrefs() {
+  if (prefsDirty()) {
+    pushPrefs();
+    return;
+  }
+  const edits = prefsEdits;
+  let data;
+  try {
+    data = await api("/api/prefs");
+  } catch (err) {
+    return;  // без связи остаёмся на копии с устройства
+  }
+  // Пока шёл ответ, человек успел что-то переключить — его правка новее.
+  if (edits !== prefsEdits) return;
+  if (!data.prefs) {
+    // Бот о настройках ещё не знает — первый запуск этой версии. Отдаём ему
+    // копию с устройства, а не затираем её пустыми.
+    pushPrefs();
+    return;
+  }
+  adoptPrefs(data.prefs);
+}
+
+/* Настройки от бота — на экран и в копию на устройстве. */
+function adoptPrefs(prefs) {
+  const real = prefs.real === true;
+  const teacher = typeof prefs.teacher === "string" ? prefs.teacher : "";
+  if (real === state.real && teacher === state.teacher) return;
+  state.real = real;
+  writeReal(real);
+  const reload = teacher !== state.teacher && !!teacher;
+  if (teacher !== state.teacher) {
+    state.teacher = teacher;
+    state.tdata = null;
+    state.terror = "";
+    writeTeacher(teacher);
+  }
+  render();
+  if (reload) loadTeacher(teacher);
 }
 
 /* Что сейчас на экране: расписание преподавателя или группы. В настройках
@@ -454,6 +561,7 @@ function pickTeacher(name) {
   state.tdata = null;
   state.terror = "";
   writeTeacher(name);
+  pushPrefs();
   if (state.tab === "settings") state.tab = "list";
   render();
   loadTeacher(name);
@@ -465,6 +573,7 @@ function clearTeacher() {
   state.tdata = null;
   state.terror = "";
   writeTeacher("");
+  pushPrefs();
   render();
 }
 
@@ -1408,8 +1517,11 @@ function viewCard() {
     const btn = el("button", state.real === value ? "on" : null, label);
     btn.onclick = () => {
       haptic();
-      state.real = value;
-      writeReal(value);
+      if (state.real !== value) {
+        state.real = value;
+        writeReal(value);
+        pushPrefs();
+      }
       render();
     };
     seg.append(btn);
@@ -1708,9 +1820,12 @@ async function pickGroup(group) {
     state.teachers = null;
     // Группу выбирают, чтобы увидеть её расписание, — режим преподавателя
     // тут только мешал бы.
-    state.teacher = "";
-    state.tdata = null;
-    writeTeacher("");
+    if (state.teacher) {
+      state.teacher = "";
+      state.tdata = null;
+      writeTeacher("");
+      pushPrefs();
+    }
     await loadSchedule(group.id);
     refreshNotes(group.id);
   } catch (err) {
@@ -1783,6 +1898,10 @@ function render() {
   } else if (teacherMode()) {
     if (state.tab === "list") renderList();
     else renderCalendar();
+  } else if (!data && state.failure) {
+    showError(state.failure, loadInitial);
+  } else if (!data && state.pending) {
+    $("view").replaceChildren(loadingBox("Загружаем расписание…"));
   } else if (!data || data.empty) {
     const box = el("div", "state");
     box.append(el("b", null, "Расписание не выбрано"),
@@ -1808,10 +1927,6 @@ function loadingBox(text) {
   const box = el("div", "state");
   box.append(el("div", "spinner"), el("div", null, text), el("div", "retry-note"));
   return box;
-}
-
-function showLoading() {
-  $("view").replaceChildren(loadingBox("Загружаем расписание…"));
 }
 
 function showError(message, retry) {
@@ -1898,9 +2013,13 @@ function refreshNotes(groupId = "") {
 
 async function loadInitial() {
   state.notes = readNotes();
+  state.failure = "";
   // Открытый в прошлый раз преподаватель поднимается параллельно с группой:
   // группа нужна и ему — по её парам видно, к чему можно писать заметки.
   state.teacher = readTeacher();
+  // Настройки сверяются с ботом параллельно со всем остальным: копия на
+  // устройстве пропадает с каждой сменой адреса туннеля.
+  syncPrefs();
   if (state.teacher) {
     render();
     loadTeacher(state.teacher);
@@ -1920,15 +2039,21 @@ async function loadInitial() {
     return;
   }
 
-  // На экране преподаватель — загрузку и ошибку группы не показываем поверх
-  // него: группа тут нужна только для заметок.
-  if (!teacherMode()) showLoading();
+  // Кэша нет — первый запуск или новый адрес туннеля. Загрузку и ошибку
+  // рисует render() по state.pending и state.failure. На экране
+  // преподаватель — они не видны поверх него: группа тут нужна только для
+  // заметок, а к ней он вернётся кнопкой в шапке и увидит, что с ней.
+  state.pending = true;
+  render();
   try {
     await loadSchedule();
     refreshNotes();
   } catch (err) {
-    if (!teacherMode()) showError(explainFailure(err), loadInitial);
+    state.failure = explainFailure(err);
+  } finally {
+    state.pending = false;
   }
+  if (!state.data) render();
 }
 
 /* Почему не загрузилось — человеческим языком. Сервер на запрос без подписи

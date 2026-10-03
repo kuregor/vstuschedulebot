@@ -17,6 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -156,11 +157,37 @@ class User(Base):
     )
     # Писать ли человеку, когда расписание его группы изменилось.
     notify: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Личные настройки приложения: «Реальные пары», открытый преподаватель.
+    # Бот в них не заглядывает, только хранит и отдаёт обратно. Держать их
+    # на устройстве нельзя: localStorage привязан к адресу страницы, а адрес
+    # туннеля меняется при каждом перезапуске. None — ещё ничего не сохраняли.
+    prefs: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
     group: Mapped[Group | None] = relationship(lazy="joined")
+
+
+class AppButton(Base):
+    """Сообщение бота с кнопкой, открывающей приложение.
+
+    Кнопка хранит адрес приложения на стороне Telegram, а адрес быстрого
+    туннеля меняется при каждом перезапуске. Историю чата бот читать не
+    может, поэтому запоминает такие сообщения сам — и при смене адреса
+    переписывает в них кнопку. Иначе человек жмёт её под вчерашним
+    напоминанием и попадает на мёртвый поддомен («no tunnel here»).
+    """
+
+    __tablename__ = "app_buttons"
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # куда кнопка ведёт сейчас: совпало с текущим адресом — править незачем
+    url: Mapped[str] = mapped_column(Text, default="")
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class ImportLog(Base):

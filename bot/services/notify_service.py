@@ -15,15 +15,13 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import Group, Lesson, LessonNote, ScheduleChange, User
 from ..db.session import SessionLocal
 from ..utils.formatting import DOW_FULL
-from ..webapp import public_url
-from . import notes_service
+from . import button_service, notes_service
 
 log = logging.getLogger(__name__)
 
@@ -38,18 +36,6 @@ STALE_AFTER = timedelta(days=3)
 # Напоминание, опоздавшее на полдня (бот лежал), уже не помогает: пара либо
 # прошла, либо вот-вот начнётся, и человек всё равно смотрит расписание сам.
 REMINDER_STALE_AFTER = timedelta(hours=12)
-
-
-def _keyboard() -> InlineKeyboardMarkup | None:
-    """Кнопка «открыть расписание» — если у бота сейчас есть публичный адрес."""
-    url = public_url.current()
-    if not url:
-        return None
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📅 Открыть расписание", web_app=WebAppInfo(url=url))]
-        ]
-    )
 
 
 async def _recipients(session: AsyncSession, group_id: int) -> list[int]:
@@ -92,7 +78,6 @@ async def send_pending(bot: Bot) -> int:
         if not pending:
             return 0
 
-        keyboard = _keyboard()
         for change in pending:
             change.notified = True
             if _is_stale(change, now):
@@ -100,9 +85,9 @@ async def send_pending(bot: Bot) -> int:
                 continue
             for chat_id in await _recipients(session, change.group_id):
                 try:
-                    await bot.send_message(
-                        chat_id, change.summary, reply_markup=keyboard
-                    )
+                    # с кнопкой «открыть расписание», которую бот потом сам
+                    # переводит на новый адрес туннеля
+                    await button_service.send(bot, chat_id, change.summary)
                     sent += 1
                 except TelegramAPIError as exc:
                     # заблокировали бота, удалили чат — остальных это не касается
@@ -146,7 +131,6 @@ async def send_reminders(bot: Bot) -> int:
         if not pending:
             return 0
 
-        keyboard = _keyboard()
         for note in pending:
             note.remind_sent = True
             planned = note.remind_at
@@ -163,10 +147,8 @@ async def send_reminders(bot: Bot) -> int:
 
             group, lesson = place
             try:
-                await bot.send_message(
-                    note.telegram_id,
-                    _reminder_text(group, lesson, note),
-                    reply_markup=keyboard,
+                await button_service.send(
+                    bot, note.telegram_id, _reminder_text(group, lesson, note)
                 )
                 sent += 1
             except TelegramAPIError as exc:

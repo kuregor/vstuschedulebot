@@ -17,6 +17,7 @@ from ..services import source_service as sources_svc
 from ..services import teacher_service as teacher_svc
 from . import public_url
 from .api import (
+    clean_prefs,
     schedule_etag,
     schedule_json,
     settings_json,
@@ -338,6 +339,37 @@ async def handle_notify(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "saved": True, "on": on})
 
 
+async def handle_prefs(request: web.Request) -> web.Response:
+    """Личные настройки приложения: «Реальные пары», открытый преподаватель.
+
+    Раньше они жили только в localStorage, а он привязан к адресу страницы:
+    туннель после каждого перезапуска выдаёт новый поддомен, и настройки
+    обнулялись. Теперь их хранит бот, а приложение держит лишь копию для
+    первого кадра. `prefs: null` — человек ещё ничего не сохранял, и
+    приложение в ответ отдаёт боту свои.
+    """
+    user_id = _user_id(request)
+    if user_id is None:
+        return web.json_response({"prefs": None})
+    async with SessionLocal() as session:
+        user = await svc.get_user(session, user_id)
+        prefs = user.prefs if user is not None else None
+    return web.json_response({"prefs": prefs}, dumps=_dumps_utf8)
+
+
+async def handle_set_prefs(request: web.Request) -> web.Response:
+    """Запись личных настроек. Ключи, которых нет в запросе, не трогаются."""
+    user_id = _user_id(request)
+    prefs = clean_prefs(await request.json())
+    if user_id is None:  # отладка без подписи Telegram — сохранять некому
+        return web.json_response({"ok": True, "saved": False, "prefs": prefs})
+    async with SessionLocal() as session:
+        prefs = await svc.set_user_prefs(session, user_id, prefs)
+    return web.json_response(
+        {"ok": True, "saved": True, "prefs": prefs}, dumps=_dumps_utf8
+    )
+
+
 async def handle_health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
@@ -407,6 +439,8 @@ def create_app() -> web.Application:
             web.post("/api/source", handle_pick_source),
             web.post("/api/group", handle_select_group),
             web.post("/api/notify", handle_notify),
+            web.get("/api/prefs", handle_prefs),
+            web.post("/api/prefs", handle_set_prefs),
             web.get("/api/notes", handle_notes),
             web.post("/api/note", handle_set_note),
             web.post("/api/reminder", handle_set_reminder),

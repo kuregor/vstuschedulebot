@@ -161,6 +161,33 @@ def settings_json(
     }
 
 
+# Длиннее имя преподавателя быть не может: столько вмещает lessons.teacher.
+TEACHER_NAME_MAX = 128
+
+
+def clean_prefs(raw) -> dict:
+    """Личные настройки приложения из запроса — только известные ключи.
+
+    Бот хранит их одним JSON и сам в них не заглядывает, поэтому всё, что
+    пришло, проверяется здесь: чужой ключ или не тот тип просто отбрасываются,
+    а не ложатся в базу как есть.
+
+    * `real` — режим «Реальные пары» на вкладке расписания;
+    * `teacher` — чьё расписание открыто вместо группы, пусто — своя группа.
+      Имя приходит из справочника уже сведённым, и переписывать его нельзя:
+      приложение узнаёт открытого преподавателя в списке по точному
+      совпадению.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    prefs: dict = {}
+    if isinstance(raw.get("real"), bool):
+        prefs["real"] = raw["real"]
+    if isinstance(raw.get("teacher"), str):
+        prefs["teacher"] = raw["teacher"].strip()[:TEACHER_NAME_MAX]
+    return prefs
+
+
 def group_json(group: Group) -> dict:
     return {
         "id": group.id,

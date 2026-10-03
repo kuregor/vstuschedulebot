@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,6 +23,20 @@ async def all_user_ids(session: AsyncSession) -> list[int]:
     return [row[0] for row in rows]
 
 
+async def ensure_user(session: AsyncSession, telegram_id: int) -> None:
+    """Заводит строку пользователя, если её ещё нет.
+
+    По списку пользователей бот переставляет кнопку меню, когда меняется
+    адрес приложения. Человек, который нажал /start и ещё не выбрал группу,
+    в этот список иначе не попадал бы, и его кнопка осталась бы на мёртвом
+    адресе: /start ставит кнопку лично его чату, а она главнее общей.
+    """
+    await session.execute(
+        insert(User).values(telegram_id=telegram_id).on_conflict_do_nothing()
+    )
+    await session.commit()
+
+
 async def set_user_group(session: AsyncSession, telegram_id: int, group_id: int) -> None:
     user = await get_user(session, telegram_id)
     if user is None:
@@ -39,6 +54,25 @@ async def set_user_notify(session: AsyncSession, telegram_id: int, on: bool) -> 
     else:
         user.notify = on
     await session.commit()
+
+
+async def set_user_prefs(session: AsyncSession, telegram_id: int, prefs: dict) -> dict:
+    """Дописывает личные настройки приложения -> все настройки после записи.
+
+    Ключи, которых в запросе нет, остаются как были: настройка, заведённая
+    новой версией приложения, не должна пропадать из-за старой версии,
+    оставшейся в кэше другого телефона. Не изменилось ничего — не пишем.
+    """
+    user = await get_user(session, telegram_id)
+    merged = {**((user.prefs if user is not None else None) or {}), **prefs}
+    if user is None:
+        session.add(User(telegram_id=telegram_id, prefs=merged))
+    elif user.prefs != merged:
+        user.prefs = merged
+    else:
+        return merged
+    await session.commit()
+    return merged
 
 
 async def source_stamp(session: AsyncSession, source_id: int | None) -> str:
