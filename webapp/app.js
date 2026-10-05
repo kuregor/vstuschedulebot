@@ -4,7 +4,7 @@
    Данные приходят из /api/schedule и /api/teacher. */
 
 const tg = window.Telegram?.WebApp;
-const SOURCE_URL = "https://www.vstu.ru/student/raspisanie-zanyatiy/";
+const SOURCE_URL = "https://www.vstu.ru/student/raspisaniya/zanyatiy/";
 
 const TYPES = {
   lek: { label: "Лекция", color: "var(--lek)", tint: "var(--lek-tint)" },
